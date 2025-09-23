@@ -110,8 +110,9 @@ const wss = new WebSocketServer({ server, path: "/ws/audio" });
 //     });
 // });
 
-// New SpeechClient instance
-const speechClient = new SpeechClient();
+const base64Credentials = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+const credentials = JSON.parse(Buffer.from(base64Credentials, 'base64').toString('utf8'));
+const speechClient = new SpeechClient({ credentials });
 
 wss.on("connection", (client) => {
     console.log("[server] Bot audio WS connected");
