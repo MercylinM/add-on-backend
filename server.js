@@ -5,6 +5,7 @@ import express from "express";
 import bodyParser from "body-parser";
 import { WebSocketServer } from "ws";
 import WebSocket from "ws";
+import http from "http"; // Add this line
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const app = express();
@@ -37,7 +38,10 @@ app.get("/participant-map", (req, res) => {
 });
 
 // =============== WebSocket: Audio Relay ===============
-const wss = new WebSocketServer({ noServer: true });
+// Create a new HTTP server that uses the Express app
+const server = http.createServer(app);
+// Attach the WebSocket server to the HTTP server, and specify a path
+const wss = new WebSocketServer({ server, path: "/ws/audio" });
 
 wss.on("connection", (client) => {
     console.log("[server] Bot audio WS connected");
@@ -55,7 +59,7 @@ wss.on("connection", (client) => {
     // Relay bot audio → AssemblyAI
     client.on("message", (msg) => {
         if (assembly.readyState === WebSocket.OPEN) {
-            assembly.send(msg); 
+            assembly.send(msg);
         }
     });
 
@@ -109,7 +113,7 @@ wss.on("connection", (client) => {
 // Helper: map AssemblyAI speaker label → participant name
 function mapSpeakerLabel(label) {
     if (!label) return "Unknown";
-    const index = label.charCodeAt(0) - "A".charCodeAt(0); 
+    const index = label.charCodeAt(0) - "A".charCodeAt(0);
     return participantMap[index]?.name || `Speaker ${label}`;
 }
 
@@ -145,19 +149,7 @@ Return JSON with fields: { "summary": "...", "semantics": "...", "questions": ["
 }
 
 // =============== HTTP + WS Upgrade ===============
-const server = app.listen(3000, () => {
-    console.log("[server] listening on http://localhost:3000");
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+    console.log(`[server] listening on port ${PORT}`);
 });
-
-server.on("upgrade", (req, socket, head) => {
-    if (req.url === "/ws/audio") {
-        wss.handleUpgrade(req, socket, head, (ws) => {
-            wss.emit("connection", ws, req);
-        });
-    } else {
-        socket.destroy();
-    }
-});
-
-
-
