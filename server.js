@@ -5,7 +5,7 @@ import express from "express";
 import bodyParser from "body-parser";
 import { WebSocketServer } from "ws";
 import WebSocket from "ws";
-import http from "http"; // Add this line
+import http from "http"; 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 const app = express();
@@ -38,17 +38,14 @@ app.get("/participant-map", (req, res) => {
 });
 
 // =============== WebSocket: Audio Relay ===============
-// Create a new HTTP server that uses the Express app
 const server = http.createServer(app);
-// Attach the WebSocket server to the HTTP server, and specify a path
 const wss = new WebSocketServer({ server, path: "/ws/audio" });
 
 wss.on("connection", (client) => {
     console.log("[server] Bot audio WS connected");
 
-    // Connect to AssemblyAI Realtime WS
     const assembly = new WebSocket(
-        "wss://api.assemblyai.com/v2/realtime/ws?sample_rate=16000",
+        "wss://streaming.assemblyai.com/v3/ws?sample_rate=16000",
         {
             headers: {
                 Authorization: process.env.ASSEMBLYAI_API_KEY,
@@ -56,14 +53,12 @@ wss.on("connection", (client) => {
         }
     );
 
-    // Relay bot audio → AssemblyAI
     client.on("message", (msg) => {
         if (assembly.readyState === WebSocket.OPEN) {
             assembly.send(msg);
         }
     });
 
-    // Relay AssemblyAI transcript → client (with mapped names + Gemini analysis)
     assembly.on("message", async (msg) => {
         try {
             const data = JSON.parse(msg.toString());
@@ -110,14 +105,12 @@ wss.on("connection", (client) => {
     });
 });
 
-// Helper: map AssemblyAI speaker label → participant name
 function mapSpeakerLabel(label) {
     if (!label) return "Unknown";
     const index = label.charCodeAt(0) - "A".charCodeAt(0);
     return participantMap[index]?.name || `Speaker ${label}`;
 }
 
-// Helper: run Gemini semantic analysis
 async function runGeminiAnalysis(speaker, text) {
     const prompt = `
 You are assisting in a recruiter interview.
@@ -134,7 +127,6 @@ Return JSON with fields: { "summary": "...", "semantics": "...", "questions": ["
     try {
         const resp = await model.generateContent(prompt);
         const raw = resp.response.text();
-        // Try to parse JSON safely
         let parsed;
         try {
             parsed = JSON.parse(raw);
