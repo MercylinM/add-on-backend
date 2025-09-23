@@ -45,7 +45,7 @@ wss.on("connection", (client) => {
     console.log("[server] Bot audio WS connected");
 
     const assembly = new WebSocket(
-        "wss://streaming.assemblyai.com/v3/ws?sample_rate=16000",
+        "wss://streaming.assemblyai.com/v3/ws?sample_rate=16000&speaker_diarization=true",
         {
             headers: {
                 Authorization: process.env.ASSEMBLYAI_API_KEY,
@@ -63,22 +63,25 @@ wss.on("connection", (client) => {
         try {
             const data = JSON.parse(msg.toString());
 
-            if (data.message_type === "FinalTranscript" && data.speaker) {
-                // Map AssemblyAI speaker label → participant name
-                const mapped = mapSpeakerLabel(data.speaker);
-                data.speaker_name = mapped;
+            if (data.type === "Turn" && data.end_of_turn) {
 
-                // ===== Gemini semantic analysis =====
-                const analysis = await runGeminiAnalysis(mapped, data.text);
+                if (data.speaker) {
+                    const mapped = mapSpeakerLabel(data.speaker);
+                    data.speaker_name = mapped;
 
-                // Bundle transcript + analysis
-                const enriched = {
-                    ...data,
-                    analysis,
-                    message_type: "enriched_transcript",
-                };
+                    // ===== Gemini semantic analysis =====
+                    const analysis = await runGeminiAnalysis(mapped, data.transcript);
 
-                client.send(JSON.stringify(enriched));
+                    const enriched = {
+                        ...data,
+                        analysis,
+                        message_type: "enriched_transcript",
+                    };
+
+                    client.send(JSON.stringify(enriched));
+                } else {
+                    client.send(JSON.stringify(data));
+                }
             } else {
                 client.send(JSON.stringify(data));
             }
@@ -86,6 +89,7 @@ wss.on("connection", (client) => {
             console.error("[server] AssemblyAI msg error:", e);
         }
     });
+
 
     assembly.on("close", () => {
         console.log("[server] AssemblyAI closed");
