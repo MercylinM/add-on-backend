@@ -1,12 +1,11 @@
 import WebSocket from "ws";
 import { spawn } from "child_process";
 
-const ws = new WebSocket("ws://localhost:3000/ws/audio");
-
+const backendUrl = process.env.BACKEND_URL || "ws://localhost:3000";
+const ws = new WebSocket(`${backendUrl}/ws/audio`);
 ws.on("open", () => {
     console.log("[sox-client] Connected to backend WS");
 
-    // Spawn SoX to capture mic → raw PCM 16k mono
     const sox = spawn("sox", [
         "-d",              
         "-r", "16000",     
