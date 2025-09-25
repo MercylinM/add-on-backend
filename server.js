@@ -194,52 +194,60 @@ app.post("/api/sox/stop", (req, res) => {
 
 app.get("/api/sox/devices", (req, res) => {
     try {
-
-        exec('pactl list sources', (error, stdout, stderr) => {
-            if (error) {
-                console.error("[server] Error getting audio devices:", error);
-                return res.status(500).json({ success: false, message: error.message });
+        exec('which pactl', (error, stdout, stderr) => {
+            if (error || !stdout) {
+                console.error("[server] pactl command not found");
+                return res.status(500).json({
+                    success: false,
+                    message: "Audio device management requires PulseAudio (pactl), but it is not installed."
+                });
             }
 
-            const devices = [];
-            const lines = stdout.split('\n');
-            let currentDevice = null;
+            exec('pactl list sources', (error, stdout, stderr) => {
+                if (error) {
+                    console.error("[server] Error getting audio devices:", error);
+                    return res.status(500).json({ success: false, message: error.message });
+                }
 
-            for (const line of lines) {
-                if (line.includes('Source #')) {
-                    if (currentDevice) {
-                        devices.push(currentDevice);
-                    }
-                    currentDevice = { name: '', description: '' };
-                } else if (line.includes('Name:')) {
-                    if (currentDevice) {
-                        currentDevice.name = line.split('Name: ')[1].trim();
-                    }
-                } else if (line.includes('Description:')) {
-                    if (currentDevice) {
-                        currentDevice.description = line.split('Description: ')[1].trim();
+                const devices = [];
+                const lines = stdout.split('\n');
+                let currentDevice = null;
+
+                for (const line of lines) {
+                    if (line.includes('Source #')) {
+                        if (currentDevice) {
+                            devices.push(currentDevice);
+                        }
+                        currentDevice = { name: '', description: '' };
+                    } else if (line.includes('Name:')) {
+                        if (currentDevice) {
+                            currentDevice.name = line.split('Name: ')[1].trim();
+                        }
+                    } else if (line.includes('Description:')) {
+                        if (currentDevice) {
+                            currentDevice.description = line.split('Description: ')[1].trim();
+                        }
                     }
                 }
-            }
 
-            if (currentDevice) {
-                devices.push(currentDevice);
-            }
+                if (currentDevice) {
+                    devices.push(currentDevice);
+                }
 
-            devices.unshift(
-                { name: 'default', description: 'Default input device' },
-                { name: 'monitor', description: 'Monitor of output device' }
-            );
+                devices.unshift(
+                    { name: 'default', description: 'Default input device' },
+                    { name: 'monitor', description: 'Monitor of output device' }
+                );
 
-            res.json({ success: true, devices });
+                res.json({ success: true, devices });
+            });
         });
-
-
     } catch (error) {
         console.error("[server] Error getting audio devices:", error);
         res.status(500).json({ success: false, message: error.message });
     }
 });
+
 
 
 // =============== WebSocket: Audio Relay ===============
