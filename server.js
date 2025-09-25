@@ -9,16 +9,24 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import speech from "@google-cloud/speech"
 import { Writable } from 'stream';
 import cors from 'cors';
+import { exec } from 'child_process';
+import { spawn } from 'child_process';
+import path from 'path';
 
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 
 const app = express();
 app.use(cors({
-    origin: ['https://recos-meet-addon.vercel.app', 'http://localhost:3000'], 
+    origin: ['*'], 
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept'],
     credentials: true
 }));
+
 
 app.use(bodyParser.json());
 
@@ -69,9 +77,6 @@ app.post("/api/sox/start", async (req, res) => {
         }
 
         const { device = "default" } = req.body;
-
-        const { spawn } = require('child_process');
-        const path = require('path');
 
         const soxPath = path.join(__dirname, './sox_client.js');
 
@@ -161,7 +166,6 @@ app.post("/api/sox/stop", (req, res) => {
 
 app.get("/api/sox/devices", (req, res) => {
     try {
-        const { exec } = require('child_process');
 
         exec('pactl list sources', (error, stdout, stderr) => {
             if (error) {
@@ -201,6 +205,7 @@ app.get("/api/sox/devices", (req, res) => {
 
             res.json({ success: true, devices });
         });
+
 
     } catch (error) {
         console.error("[server] Error getting audio devices:", error);
