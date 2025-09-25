@@ -213,14 +213,6 @@ app.get("/api/sox/devices", (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws/audio" });
 
-// Add CORS headers to the HTTP server
-app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
-    next();
-});
-
 // wss.on("connection", (client) => {
 //     console.log("[server] Bot audio WS connected");
 
