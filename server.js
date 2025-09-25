@@ -541,9 +541,10 @@ const speechCallback = async (stream) => {
     }
 };
 
-wss.on("connection", (client) => {
+wss.on("connection", (client, req) => {
+    const origin = req.headers.origin;
 
-    const allowedOrigins = ['https://recos-meet-addon.vercel.app', 'http://localhost:3000'];
+    const allowedOrigins = ['*'];
     if (!allowedOrigins.includes(origin)) {
         client.close(1008, 'Origin not allowed');
         return;
@@ -562,6 +563,7 @@ wss.on("connection", (client) => {
                 }
 
                 if (newStream && lastAudioInput.length > 0) {
+
                     const chunkTime = streamingLimit / lastAudioInput.length;
                     if (chunkTime !== 0) {
                         if (bridgingOffset < 0) {
