@@ -6,353 +6,14 @@ import bodyParser from "body-parser";
 import { WebSocketServer } from "ws";
 import http from "http"; 
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { SpeechClient, } from "@google-cloud/speech";
 import speech from "@google-cloud/speech"
-import puppeteer from 'puppeteer-extra';
-import StealthPlugin from 'puppeteer-extra-plugin-stealth';
 import { Writable } from 'stream';
 
 
-puppeteer.use(StealthPlugin());
 
 const app = express();
 app.use(bodyParser.json());
 
-// =============== Interview Bot Class ===============
-class InterviewBot {
-    constructor(aiJoinUrl) {
-        this.aiJoinUrl = aiJoinUrl;
-        this.googleEmail = process.env.GOOGLE_EMAIL;
-        this.googlePassword = process.env.GOOGLE_PASSWORD;
-        this.browser = null;
-        this.page = null;
-        this.isJoined = false;
-    }
-
-    async joinInterview() {
-        try {
-            console.log('[interview-bot] Starting to join interview with Chrome...');
-
-            const chromePaths = [
-                '/usr/bin/google-chrome-stable',
-                '/usr/bin/google-chrome',
-                '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', 
-                'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe' 
-            ];
-
-            let executablePath = null;
-            for (const path of chromePaths) {
-                try {
-                    const fs = await import('fs');
-                    if (fs.existsSync(path)) {
-                        executablePath = path;
-                        console.log(`[interview-bot] Found Chrome at: ${path}`);
-                        break;
-                    }
-                } catch (error) {
-                    // Continue checking next path
-                }
-            }
-
-            if (!executablePath) {
-                console.log('[interview-bot] Chrome not found, falling back to Chromium');
-            }
-
-            this.browser = await puppeteer.launch({
-                headless: false,
-                executablePath: executablePath, 
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-accelerated-2d-canvas',
-                    '--no-first-run',
-                    '--no-zygote',
-                    '--disable-gpu',
-                    '--disable-web-security',
-                    '--disable-features=TranslateUI',
-                    '--disable-background-timer-throttling',
-                    '--disable-backgrounding-occluded-windows',
-                    '--disable-renderer-backgrounding',
-                    '--window-size=1280,720',
-                    '--user-data-dir=./chrome_user_data' 
-                ],
-                ignoreHTTPSErrors: true
-            });
-
-            const pages = await this.browser.pages();
-            this.page = pages[0] || await this.browser.newPage();
-
-            await this.page.setViewport({ width: 1280, height: 720 });
-
-            await this.page.setUserAgent(
-                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            );
-
-            await this.page.evaluateOnNewDocument(() => {
-                Object.defineProperty(navigator, 'webdriver', { get: () => false });
-                Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            });
-
-            console.log('[interview-bot] Navigating to Google Meet with Chrome...');
-            await this.page.goto(this.aiJoinUrl, {
-                waitUntil: 'networkidle2',
-                timeout: 90000
-            });
-
-            await this.delay(10000);
-
-            const currentUrl = this.page.url();
-            console.log('[interview-bot] Current URL:', currentUrl);
-
-            if (currentUrl.includes('accounts.google.com')) {
-                console.log('[interview-bot] 🔐 Google authentication required');
-                await this.handleGoogleAuth();
-            } else if (currentUrl.includes('meet.google.com')) {
-                console.log('[interview-bot] 🎯 On Google Meet page');
-                const joinResult = await this.joinMeet();
-                if (joinResult) {
-                    this.isJoined = true;
-                    return true;
-                }
-            }
-
-            console.log('[interview-bot] ⚠️ Could not auto-join, keeping browser open for manual join');
-            this.isJoined = true;
-            return true;
-
-        } catch (error) {
-            console.error('[interview-bot] Error:', error);
-            await this.cleanup();
-            throw error;
-        }
-    }
-
-    async handleGoogleAuth() {
-        try {
-            if (this.googleEmail && this.googlePassword) {
-                console.log('[interview-bot] Attempting automated Google sign-in...');
-                await this.autoSignIn();
-            } else {
-                console.log('[interview-bot] ❗ No Google credentials provided');
-                console.log('[interview-bot] Please sign in manually in the browser window');
-                console.log('[interview-bot] Waiting 45 seconds for manual sign-in...');
-                await this.delay(45000);
-
-                if (this.page.url().includes('meet.google.com')) {
-                    return await this.joinMeet();
-                }
-            }
-        } catch (error) {
-            console.error('[interview-bot] Auth handling error:', error);
-        }
-        return false;
-    }
-
-    async autoSignIn() {
-        try {
-            await this.page.waitForSelector('input[type="email"]', { timeout: 10000 });
-            await this.page.type('input[type="email"]', this.googleEmail);
-            await this.page.click('#identifierNext');
-
-            await this.delay(3000);
-
-            await this.page.waitForSelector('input[type="password"]', { timeout: 10000 });
-            await this.page.type('input[type="password"]', this.googlePassword);
-            await this.page.click('#passwordNext');
-
-            await this.delay(8000);
-
-            console.log('[interview-bot] Sign-in completed, checking redirect...');
-
-        } catch (error) {
-            console.error('[interview-bot] Automated sign-in failed:', error);
-            throw error;
-        }
-    }
-
-    async joinMeet() {
-        console.log('[interview-bot] Attempting to join Google Meet...');
-
-        await this.delay(8000);
-
-        const strategies = [
-            this.clickJoinButton.bind(this),
-            this.pressEnterKey.bind(this),
-            this.checkAlreadyJoined.bind(this)
-        ];
-
-        for (const strategy of strategies) {
-            const result = await strategy();
-            if (result) {
-                console.log('[interview-bot] ✅ Join successful!');
-                return true;
-            }
-            await this.delay(3000);
-        }
-
-        return false;
-    }
-
-    async clickJoinButton() {
-        const joinSelectors = [
-            'div[role="button"][aria-label*="Join" i]',
-            'button[aria-label*="Join" i]',
-            'button:has-text("Join now")',
-            'button:has-text("Ask to join")',
-            '[data-tooltip*="Join" i]',
-            '.join-button',
-            'button[custom-data="join"]'
-        ];
-
-        for (const selector of joinSelectors) {
-            try {
-                await this.page.waitForSelector(selector, { timeout: 5000 });
-                await this.page.click(selector);
-                console.log(`[interview-bot] Clicked: ${selector}`);
-
-                await this.delay(6000);
-
-                if (await this.isInMeeting()) {
-                    return true;
-                }
-            } catch (error) {
-                // Continue to next selector
-            }
-        }
-        return false;
-    }
-    
-
-    async pressEnterKey() {
-        try {
-            await this.page.keyboard.press('Enter');
-            await this.delay(5000);
-            return await this.isInMeeting();
-        } catch (error) {
-            return false;
-        }
-    }
-
-    async checkAlreadyJoined() {
-        return await this.isInMeeting();
-    }
-
-    async isInMeeting() {
-        try {
-            return await this.page.evaluate(() => {
-                const indicators = [
-                    '[aria-label="Leave call"]',
-                    '[aria-label*="leave call" i]',
-                    'video',
-                    '.video-tile',
-                    '[data-meeting-code]',
-                    '[class*="meeting"]'
-                ];
-
-                for (const selector of indicators) {
-                    if (document.querySelector(selector)) {
-                        return true;
-                    }
-                }
-
-                const bodyText = document.body.innerText.toLowerCase();
-                return bodyText.includes('leave call') ||
-                    bodyText.includes('turn off camera') ||
-                    bodyText.includes('participants') ||
-                    bodyText.includes('meeting details');
-            });
-        } catch (error) {
-            return false;
-        }
-    }
-
-    async leaveInterview() {
-        if (!this.isJoined) return;
-
-        console.log('[interview-bot] Leaving interview...');
-        try {
-            const leaveSelectors = [
-                'button[aria-label*="Leave" i]',
-                'div[aria-label*="Leave" i]',
-                '[data-tooltip*="Leave" i]',
-                '.leave-call-button'
-            ];
-
-            for (const selector of leaveSelectors) {
-                try {
-                    await this.page.click(selector);
-                    await this.delay(2000);
-                    break;
-                } catch (error) {
-                    // Try next selector
-                }
-            }
-        } catch (error) {
-            console.error('[interview-bot] Error leaving interview:', error);
-        }
-
-        await this.cleanup();
-    }
-
-    async cleanup() {
-        if (this.browser) {
-            await this.browser.close();
-        }
-        this.isJoined = false;
-    }
-
-    delay(ms) {
-        return new Promise(resolve => setTimeout(resolve, ms));
-    }
-}
-
-// =============== Bot Manager ===============
-class BotManager {
-    constructor() {
-        this.currentBot = null;
-        this.isActive = false;
-    }
-
-    async startBot(aiJoinUrl) {
-        try {
-            if (this.currentBot) {
-                await this.stopBot();
-            }
-
-            console.log('[bot-manager] Starting interview bot...');
-            this.currentBot = new InterviewBot(aiJoinUrl);
-            await this.currentBot.joinInterview();
-            this.isActive = true;
-
-            console.log('[bot-manager] Interview bot started successfully');
-            return true;
-
-        } catch (error) {
-            console.error('[bot-manager] Failed to start interview bot:', error);
-            this.isActive = false;
-            throw error;
-        }
-    }
-
-    async stopBot() {
-        if (this.currentBot) {
-            await this.currentBot.leaveInterview();
-            this.currentBot = null;
-        }
-        this.isActive = false;
-        console.log('[bot-manager] Interview bot stopped');
-    }
-
-    getStatus() {
-        return {
-            isActive: this.isActive,
-            hasBot: !!this.currentBot
-        };
-    }
-}
-
-const botManager = new BotManager();
 
 // =============== Gemini Setup ===============
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
@@ -380,77 +41,161 @@ app.get("/participant-map", (req, res) => {
     res.json({ participantMap, lastUpdated });
 });
 
-// =============== Bot Control Endpoints ===============
-app.post("/bot/join", async (req, res) => {
-    try {
-        const { ai_join_url } = req.body;
 
-        if (!ai_join_url) {
-            return res.status(400).json({ error: "ai_join_url is required" });
+let soxProcess = null;
+let soxStatus = {
+    running: false,
+    pid: null,
+    startTime: null,
+    device: null
+};
+
+app.get("/api/sox/status", (req, res) => {
+    res.json(soxStatus);
+});
+
+app.post("/api/sox/start", async (req, res) => {
+    try {
+        if (soxStatus.running) {
+            return res.json({ success: false, message: "SoxClient is already running" });
         }
 
-        await botManager.startBot(ai_join_url);
-        res.json({ success: true, message: "Bot joined the interview" });
+        const { device = "default" } = req.body;
 
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+        const { spawn } = require('child_process');
+        const path = require('path');
 
-app.post("/bot/leave", async (req, res) => {
-    try {
-        await botManager.stopBot();
-        res.json({ success: true, message: "Bot left the interview" });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
+        const soxPath = path.join(__dirname, './sox_client.js');
 
-app.get("/bot/status", (req, res) => {
-    res.json(botManager.getStatus());
-});
+        const wsBackendUrl = process.env.BACKEND_URL
 
-app.post("/bot/debug", async (req, res) => {
-    try {
-        const { ai_join_url } = req.body;
-
-        if (!ai_join_url) {
-            return res.status(400).json({ error: "ai_join_url is required" });
-        }
-
-        console.log('[debug] Testing URL:', ai_join_url);
-
-        const browser = await puppeteer.launch({
-            headless: false,
-            args: ['--no-sandbox', '--disable-setuid-sandbox']
+        soxProcess = spawn('node', [soxPath, device, wsBackendUrl], {
+            detached: true,
+            stdio: 'ignore'
         });
 
-        const page = await browser.newPage();
-        await page.goto(ai_join_url);
+        soxProcess.unref();
 
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        await page.screenshot({ path: 'debug-meet.png' });
+        soxStatus = {
+            running: true,
+            pid: soxProcess.pid,
+            startTime: new Date(),
+            device: device
+        };
 
-        const pageInfo = await page.evaluate(() => ({
-            title: document.title,
-            url: window.location.href,
-            bodyText: document.body.innerText
-        }));
-
-        await browser.close();
+        console.log(`[server] Started SoxClient with PID ${soxProcess.pid} on device ${device}`);
 
         res.json({
             success: true,
-            message: "Debug completed - check debug-meet.png",
-            pageInfo: {
-                title: pageInfo.title,
-                url: pageInfo.url,
-                textSample: pageInfo.bodyText.substring(0, 500)
-            }
+            message: "SoxClient started successfully",
+            pid: soxProcess.pid,
+            device: device
+        });
+
+        soxProcess.on('exit', (code) => {
+            console.log(`[server] SoxClient process exited with code ${code}`);
+            soxStatus = {
+                running: false,
+                pid: null,
+                startTime: null,
+                device: null
+            };
+        });
+
+        soxProcess.on('error', (err) => {
+            console.error(`[server] SoxClient error:`, err);
+            soxStatus = {
+                running: false,
+                pid: null,
+                startTime: null,
+                device: null
+            };
         });
 
     } catch (error) {
-        res.status(500).json({ error: error.message });
+        console.error("[server] Error starting SoxClient:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.post("/api/sox/stop", (req, res) => {
+    try {
+        if (!soxStatus.running || !soxProcess) {
+            return res.json({ success: false, message: "SoxClient is not running" });
+        }
+
+        process.kill(soxStatus.pid, 'SIGTERM');
+
+        setTimeout(() => {
+            if (soxStatus.running) {
+                process.kill(soxStatus.pid, 'SIGKILL');
+            }
+        }, 2000);
+
+        soxStatus = {
+            running: false,
+            pid: null,
+            startTime: null,
+            device: null
+        };
+
+        soxProcess = null;
+
+        console.log("[server] SoxClient stopped");
+        res.json({ success: true, message: "SoxClient stopped successfully" });
+
+    } catch (error) {
+        console.error("[server] Error stopping SoxClient:", error);
+        res.status(500).json({ success: false, message: error.message });
+    }
+});
+
+app.get("/api/sox/devices", (req, res) => {
+    try {
+        const { exec } = require('child_process');
+
+        exec('pactl list sources', (error, stdout, stderr) => {
+            if (error) {
+                console.error("[server] Error getting audio devices:", error);
+                return res.status(500).json({ success: false, message: error.message });
+            }
+
+            const devices = [];
+            const lines = stdout.split('\n');
+            let currentDevice = null;
+
+            for (const line of lines) {
+                if (line.includes('Source #')) {
+                    if (currentDevice) {
+                        devices.push(currentDevice);
+                    }
+                    currentDevice = { name: '', description: '' };
+                } else if (line.includes('Name:')) {
+                    if (currentDevice) {
+                        currentDevice.name = line.split('Name: ')[1].trim();
+                    }
+                } else if (line.includes('Description:')) {
+                    if (currentDevice) {
+                        currentDevice.description = line.split('Description: ')[1].trim();
+                    }
+                }
+            }
+
+            if (currentDevice) {
+                devices.push(currentDevice);
+            }
+
+            devices.unshift(
+                { name: 'default', description: 'Default input device' },
+                { name: 'monitor', description: 'Monitor of output device' }
+            );
+
+            res.json({ success: true, devices });
+        });
+
+    } catch (error) {
+        console.error("[server] Error getting audio devices:", error);
+        res.status(500).json({ success: false, message: error.message });
     }
 });
 
@@ -555,7 +300,7 @@ const client = new speech.SpeechClient({ credentials });
 const encoding = 'LINEAR16';
 const sampleRateHertz = 16000;
 const languageCode = 'en-US';
-const streamingLimit = 290000; // Reduced to 4:50 to avoid 5-min API timeout
+const streamingLimit = 290000;
 
 let recognizeStream = null;
 let restartCounter = 0;
@@ -986,6 +731,13 @@ server.listen(PORT, () => {
 
 process.on('SIGINT', async () => {
     console.log('\n[server] Shutting down...');
-    await botManager.stopBot();
+    if (soxStatus.running && soxProcess) {
+        try {
+            process.kill(soxStatus.pid, 'SIGTERM');
+            console.log("[server] SoxClient stopped");
+        } catch (error) {
+            console.error("[server] Error stopping SoxClient during shutdown:", error);
+        }
+    }
     process.exit(0);
 });

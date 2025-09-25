@@ -2,8 +2,8 @@ import WebSocket from "ws";
 import { spawn } from "child_process";
 
 export class SoxClient {
-    constructor(backendUrl = "ws://localhost:3000", audioDevice = null) {
-        this.backendUrl = backendUrl;
+    constructor(backendUrl = null, audioDevice = null) {
+        this.backendUrl = backendUrl || process.env.BACKEND_WS_URL || "ws://localhost:3000";
         this.ws = null;
         this.audioProcess = null;
         this.isConnected = false;
@@ -11,7 +11,9 @@ export class SoxClient {
     }
 
     connect() {
-        this.ws = new WebSocket(`${this.backendUrl}/ws/audio`);
+        const wsUrl = `${this.backendUrl}/ws/audio`;
+        console.log(`[sox-client] Connecting to WebSocket at: ${wsUrl}`);
+        this.ws = new WebSocket(wsUrl);
 
         this.ws.on("open", () => {
             console.log("[sox-client] Connected to backend WS");
