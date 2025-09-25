@@ -8,10 +8,18 @@ import http from "http";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import speech from "@google-cloud/speech"
 import { Writable } from 'stream';
+import cors from 'cors';
 
 
 
 const app = express();
+app.use(cors({
+    origin: ['https://recos-meet-addon.vercel.app', 'http://localhost:3000'], 
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept'],
+    credentials: true
+}));
+
 app.use(bodyParser.json());
 
 
