@@ -21,47 +21,13 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-app.use(cors({
-    origin: function (origin, callback) {
-        if (!origin) return callback(null, true);
-
-        const allowedOrigins = [
-            'https://recos-meet-addon.vercel.app',
-            'http://localhost:3000'
-        ];
-
-        if (allowedOrigins.indexOf(origin) !== -1) {
-            callback(null, true);
-        } else {
-            console.log('Origin not allowed by CORS:', origin);
-            callback(new Error('Not allowed by CORS'));
-        }
-    },
-    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization'],
-    credentials: true,
-    optionsSuccessStatus: 200
-}));
-
-app.options('*', (req, res) => {
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-    res.header('Access-Control-Allow-Headers', 'Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization');
-    res.header('Access-Control-Allow-Credentials', 'true');
-    res.sendStatus(200);
-});
+app.use(cors()); 
 
 app.use((req, res, next) => {
-    res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
+    res.header('Access-Control-Allow-Origin', req.headers.origin, '*');
     res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
     res.header('Access-Control-Allow-Headers', 'Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization');
-    res.header('Access-Control-Allow-Credentials', 'true');
-
-    if (req.method === 'OPTIONS') {
-        res.sendStatus(200);
-    } else {
-        next();
-    }
+    next();
 });
 
 app.use(bodyParser.json());
