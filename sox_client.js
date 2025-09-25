@@ -222,6 +222,7 @@ export class SoxClient {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
     const audioDevice = process.argv[2];
-    const client = new SoxClient("ws://localhost:3000", audioDevice);
+    const backendUrl = process.argv[3] || "ws://localhost:3000"; 
+    const client = new SoxClient(backendUrl, audioDevice);
     client.connect();
 }

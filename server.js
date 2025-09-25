@@ -67,7 +67,8 @@ app.post("/api/sox/start", async (req, res) => {
 
         const soxPath = path.join(__dirname, './sox_client.js');
 
-        const wsBackendUrl = process.env.BACKEND_URL
+        const backendUrl = process.env.BACKEND_URL || 'http://localhost:3000';
+        const wsBackendUrl = backendUrl.replace(/^http/, 'ws');
 
         soxProcess = spawn('node', [soxPath, device, wsBackendUrl], {
             detached: true,
