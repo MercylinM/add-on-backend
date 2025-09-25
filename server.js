@@ -542,7 +542,14 @@ const speechCallback = async (stream) => {
 };
 
 wss.on("connection", (client) => {
-    console.log("[server] Bot audio WS connected");
+
+    const allowedOrigins = ['https://recos-meet-addon.vercel.app', 'http://localhost:3000'];
+    if (!allowedOrigins.includes(origin)) {
+        client.close(1008, 'Origin not allowed');
+        return;
+    }
+
+    console.log("[server] Bot audio WS connected from", origin);
 
     let audioInputStreamTransform = null;
     let isFirstConnection = wss.clients.size === 1; 
