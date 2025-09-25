@@ -4,14 +4,14 @@ dotenv.config();
 import express from "express";
 import bodyParser from "body-parser";
 import { WebSocketServer } from "ws";
-import fs from 'fs';
-import WebSocket from "ws";
 import http from "http"; 
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { SpeechClient } from "@google-cloud/speech";
-// import puppeteer from "puppeteer";
+import { SpeechClient, } from "@google-cloud/speech";
+import speech from "@google-cloud/speech"
 import puppeteer from 'puppeteer-extra';
 import StealthPlugin from 'puppeteer-extra-plugin-stealth';
+import { Writable } from 'stream';
+
 
 puppeteer.use(StealthPlugin());
 
@@ -75,7 +75,7 @@ class InterviewBot {
                     '--disable-backgrounding-occluded-windows',
                     '--disable-renderer-backgrounding',
                     '--window-size=1280,720',
-                    '--user-data-dir=./chrome_user_data' // Separate profile for Chrome
+                    '--user-data-dir=./chrome_user_data' 
                 ],
                 ignoreHTTPSErrors: true
             });
@@ -85,7 +85,6 @@ class InterviewBot {
 
             await this.page.setViewport({ width: 1280, height: 720 });
 
-            // Set a realistic user agent for Chrome
             await this.page.setUserAgent(
                 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             );
@@ -460,6 +459,14 @@ app.post("/bot/debug", async (req, res) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws/audio" });
 
+// Add CORS headers to the HTTP server
+app.use((req, res, next) => {
+    res.header('Access-Control-Allow-Origin', '*');
+    res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    res.header('Access-Control-Allow-Headers', 'Origin, X-Requested-With, Content-Type, Accept');
+    next();
+});
+
 // wss.on("connection", (client) => {
 //     console.log("[server] Bot audio WS connected");
 
@@ -528,87 +535,371 @@ const wss = new WebSocketServer({ server, path: "/ws/audio" });
 //     });
 // });
 
+// =============== WebSocket: Audio Relay with Continuous Streaming ===============
+
+// =============== WebSocket: Audio Relay with Continuous Streaming ===============
+
+// =============== WebSocket: Audio Relay with Continuous Streaming ===============
+
 const base64Credentials = process.env.GOOGLE_APPLICATION_CREDENTIALS || "./keyfile.json";
 const credentials = JSON.parse(Buffer.from(base64Credentials, 'base64').toString('utf8'));
-const speechClient = new SpeechClient({ credentials });
+
+const SPEAKER_BUFFER = {};
+const MIN_SEGMENT_LENGTH = 50;
+const MAX_SEGMENT_LENGTH = 500;
+const SILENCE_THRESHOLD_MS = 3000;
+let lastSpeechTime = {};
+
+const client = new speech.SpeechClient({ credentials });
+
+const encoding = 'LINEAR16';
+const sampleRateHertz = 16000;
+const languageCode = 'en-US';
+const streamingLimit = 290000; // Reduced to 4:50 to avoid 5-min API timeout
+
+let recognizeStream = null;
+let restartCounter = 0;
+let audioInput = [];
+let lastAudioInput = [];
+let resultEndTime = 0;
+let isFinalEndTime = 0;
+let finalRequestEndTime = 0;
+let newStream = true;
+let bridgingOffset = 0;
+let lastTranscriptWasFinal = false;
+let isStreamAlive = false;
+let streamTimeout = null; 
+let pendingRestart = false; 
+
+function startStream() {
+    if (streamTimeout) {
+        clearTimeout(streamTimeout);
+        streamTimeout = null;
+    }
+
+    if (recognizeStream) {
+        try {
+            recognizeStream.end();
+            recognizeStream.removeAllListeners();
+        } catch (err) {
+            console.error('[speech-stream] Error cleaning up previous stream:', err);
+        }
+        recognizeStream = null;
+    }
+
+    audioInput = [];
+    lastAudioInput = [];
+    resultEndTime = 0;
+    isFinalEndTime = 0;
+    finalRequestEndTime = 0;
+    newStream = true;
+    bridgingOffset = 0;
+    isStreamAlive = true;
+    pendingRestart = false;
+
+    const request = {
+        config: {
+            encoding: encoding,
+            sampleRateHertz: sampleRateHertz,
+            languageCode: languageCode,
+            enableAutomaticPunctuation: true,
+            diarizationConfig: {
+                enableSpeakerDiarization: true,
+                minSpeakerCount: 1,
+                maxSpeakerCount: 6,
+            },
+            model: 'latest_long',
+            useEnhanced: true,
+        },
+        interimResults: true,
+    };
+
+    recognizeStream = client
+        .streamingRecognize(request)
+        .on('error', err => {
+            console.error('[speech-stream] API error:', err);
+            isStreamAlive = false;
+
+            if (!pendingRestart) {
+                pendingRestart = true;
+                if (err.code === 11) { 
+                    console.log('[speech-stream] Restarting due to timeout');
+                    restartStream();
+                } else {
+                    console.error('[speech-stream] Non-timeout error:', err);
+                    setTimeout(() => restartStream(), 1000);
+                }
+            }
+        })
+        .on('data', speechCallback)
+        .on('end', () => {
+            console.log('[speech-stream] Stream ended naturally');
+            isStreamAlive = false;
+
+            if (!pendingRestart) {
+                pendingRestart = true;
+                restartStream();
+            }
+        });
+
+    streamTimeout = setTimeout(() => {
+        console.log('[speech-stream] Restarting due to time limit');
+        restartStream();
+    }, streamingLimit);
+
+    console.log(`[speech-stream] Stream started (restart counter: ${restartCounter})`);
+}
+
+function restartStream() {
+    if (pendingRestart) return; 
+
+    pendingRestart = true;
+    console.log(`[speech-stream] Restarting stream (counter: ${restartCounter})`);
+
+    if (streamTimeout) {
+        clearTimeout(streamTimeout);
+        streamTimeout = null;
+    }
+
+    isStreamAlive = false;
+
+    if (recognizeStream) {
+        try {
+            recognizeStream.end();
+            recognizeStream.removeAllListeners();
+        } catch (err) {
+            console.error('[speech-stream] Error during stream cleanup:', err);
+        }
+        recognizeStream = null;
+    }
+
+    if (resultEndTime > 0) {
+        finalRequestEndTime = isFinalEndTime;
+        lastAudioInput = [...audioInput];
+    }
+
+    audioInput = [];
+    resultEndTime = 0;
+    newStream = true;
+
+    restartCounter++;
+
+    const delay = Math.min(1000 * Math.pow(1.5, restartCounter % 5), 10000);
+
+    setTimeout(() => {
+        startStream();
+    }, delay);
+}
+
+const speechCallback = async (stream) => {
+    try {
+        if (stream.results[0] && stream.results[0].resultEndTime) {
+            resultEndTime =
+                stream.results[0].resultEndTime.seconds * 1000 +
+                Math.round(stream.results[0].resultEndTime.nanos / 1000000);
+        }
+
+        const correctedTime =
+            resultEndTime - bridgingOffset + streamingLimit * restartCounter;
+
+        if (stream.results[0] && stream.results[0].alternatives[0]) {
+            const transcript = stream.results[0].alternatives[0].transcript;
+            const isFinal = stream.results[0].isFinal;
+
+            let speakerTag = 'Unknown';
+            if (stream.results[0].alternatives[0].words &&
+                stream.results[0].alternatives[0].words.length > 0) {
+                speakerTag = stream.results[0].alternatives[0].words[0].speakerTag || 'Unknown';
+            }
+
+            const mappedSpeaker = mapSpeakerLabel(`${speakerTag}`);
+
+            if (isFinal) {
+                console.log(`[speech-stream] ${correctedTime}: ${mappedSpeaker} - ${transcript}`);
+
+                if (!SPEAKER_BUFFER[mappedSpeaker]) {
+                    SPEAKER_BUFFER[mappedSpeaker] = '';
+                    lastSpeechTime[mappedSpeaker] = Date.now();
+                }
+
+                SPEAKER_BUFFER[mappedSpeaker] += ' ' + transcript;
+                lastSpeechTime[mappedSpeaker] = Date.now();
+
+                const shouldProcess =
+                    SPEAKER_BUFFER[mappedSpeaker].length >= MAX_SEGMENT_LENGTH ||
+                    (SPEAKER_BUFFER[mappedSpeaker].length >= MIN_SEGMENT_LENGTH &&
+                        Date.now() - lastSpeechTime[mappedSpeaker] > SILENCE_THRESHOLD_MS);
+
+                if (shouldProcess) {
+                    const textToAnalyze = SPEAKER_BUFFER[mappedSpeaker].trim();
+
+                    if (textToAnalyze.length > MIN_SEGMENT_LENGTH) {
+                        const analysis = await runGeminiAnalysis(mappedSpeaker, textToAnalyze);
+
+                        const enriched = {
+                            transcript: textToAnalyze,
+                            speaker_name: mappedSpeaker,
+                            speaker_tag: speakerTag,
+                            analysis: analysis,
+                            message_type: "enriched_transcript",
+                            end_of_turn: true,
+                            timestamp: correctedTime,
+                            is_final: true
+                        };
+
+                        wss.clients.forEach(client => {
+                            if (client.readyState === WebSocket.OPEN) {
+                                client.send(JSON.stringify(enriched));
+                            }
+                        });
+                    }
+
+                    SPEAKER_BUFFER[mappedSpeaker] = '';
+                } else {
+                    const interimData = {
+                        transcript: transcript,
+                        speaker_name: mappedSpeaker,
+                        speaker_tag: speakerTag,
+                        message_type: "interim_transcript",
+                        end_of_turn: false,
+                        timestamp: correctedTime,
+                        is_final: false
+                    };
+
+                    wss.clients.forEach(client => {
+                        if (client.readyState === WebSocket.OPEN) {
+                            client.send(JSON.stringify(interimData));
+                        }
+                    });
+                }
+            } else {
+                const interimData = {
+                    transcript: transcript,
+                    speaker_name: mappedSpeaker,
+                    speaker_tag: speakerTag,
+                    message_type: "interim_transcript",
+                    end_of_turn: false,
+                    timestamp: correctedTime,
+                    is_final: false
+                };
+
+                wss.clients.forEach(client => {
+                    if (client.readyState === WebSocket.OPEN) {
+                        client.send(JSON.stringify(interimData));
+                    }
+                });
+            }
+        }
+    } catch (error) {
+        console.error('[speech-stream] Error processing speech callback:', error);
+    }
+};
 
 wss.on("connection", (client) => {
     console.log("[server] Bot audio WS connected");
 
-    let audioStream = null;
+    let audioInputStreamTransform = null;
+    let isFirstConnection = wss.clients.size === 1; 
 
-    const startStreaming = () => {
-
-        const request = {
-            config: {
-                encoding: "LINEAR16", 
-                sampleRateHertz: 16000,
-                languageCode: "en-US",
-                enableAutomaticPunctuation: true,
-                diarizationConfig: {
-                    enableSpeakerDiarization: true,
-                    minSpeakerCount: 2, 
-                    maxSpeakerCount: 4 
+    audioInputStreamTransform = new Writable({
+        write(chunk, encoding, next) {
+            try {
+                if (!isStreamAlive || !recognizeStream) {
+                    return next();
                 }
-            },
-            interimResults: true,
-        };
-    
 
-        const audioStream = speechClient.streamingRecognize(request);
+                if (newStream && lastAudioInput.length > 0) {
+                    const chunkTime = streamingLimit / lastAudioInput.length;
+                    if (chunkTime !== 0) {
+                        if (bridgingOffset < 0) {
+                            bridgingOffset = 0;
+                        }
+                        if (bridgingOffset > finalRequestEndTime) {
+                            bridgingOffset = finalRequestEndTime;
+                        }
+                        const chunksFromMS = Math.floor(
+                            (finalRequestEndTime - bridgingOffset) / chunkTime
+                        );
+                        bridgingOffset = Math.floor(
+                            (lastAudioInput.length - chunksFromMS) * chunkTime
+                        );
 
+                        for (let i = chunksFromMS; i < lastAudioInput.length; i++) {
+                            if (recognizeStream && isStreamAlive) {
+                                recognizeStream.write(lastAudioInput[i]);
+                            } else {
+                                break;
+                            }
+                        }
+                    }
+                    newStream = false;
+                    lastAudioInput = [];
+                }
 
-        audioStream.on("data", async (data) => {
-            const result = data.results[0];
-            if (result.isFinal) {
-                const speakerTag = words[0].speakerTag;
-                const mapped = mapSpeakerLabel(`${speakerTag}`);
-                const transcript = result.alternatives[0].transcript;
+                audioInput.push(chunk);
 
-                // ===== Gemini semantic analysis =====
-                const analysis = await runGeminiAnalysis(mapped, transcript);
+                if (recognizeStream && isStreamAlive) {
+                    recognizeStream.write(chunk);
+                }
 
-                const enriched = {
-                    transcript,
-                    speaker_name: mapped,
-                    analysis,
-                    message_type: "enriched_transcript",
-                    end_of_turn: true,
-                };
-                client.send(JSON.stringify(enriched));
-            } else {
-                const partial = {
-                    transcript: result.alternatives[0].transcript,
-                    message_type: "PartialTranscript",
-                };
-                client.send(JSON.stringify(partial));
+                next();
+            } catch (error) {
+                console.error('[speech-stream] Error writing to stream:', error);
+                next();
             }
-        });
+        },
 
-        audioStream.on("end", () => {
-            console.log("[server] Google Cloud stream ended");
-        });
+        final() {
+            console.log('[speech-stream] Audio stream ended');
+        }
+    });
 
-        audioStream.on("error", (err) => {
-            console.error("[server] Google Cloud error:", err);
-            client.send(JSON.stringify({ error: "Google Cloud error", err }));
-        });
-
+    if (isFirstConnection) {
+        startStream();
     }
 
-    startStreaming();
-
     client.on("message", (msg) => {
-        if (audioStream) {
-            audioStream.write(msg);
+        try {
+            if (audioInputStreamTransform && msg instanceof Buffer) {
+                audioInputStreamTransform.write(msg);
+            }
+        } catch (error) {
+            console.error('[server] Error processing audio message:', error);
         }
     });
 
     client.on("close", () => {
         console.log("[server] Bot WS closed");
-        if (audioStream) {
-            audioStream.end();
+        if (audioInputStreamTransform) {
+            audioInputStreamTransform.end();
         }
+
+        if (wss.clients.size === 0) {
+            console.log("[server] No more clients, stopping stream");
+            if (streamTimeout) {
+                clearTimeout(streamTimeout);
+                streamTimeout = null;
+            }
+            isStreamAlive = false;
+            if (recognizeStream) {
+                try {
+                    recognizeStream.end();
+                    recognizeStream.removeAllListeners();
+                } catch (err) {
+                    console.error('[speech-stream] Error during final cleanup:', err);
+                }
+                recognizeStream = null;
+            }
+            // Reset state
+            audioInput = [];
+            lastAudioInput = [];
+            restartCounter = 0;
+            pendingRestart = false;
+        }
+    });
+
+    client.on("error", (error) => {
+        console.error("[server] WebSocket client error:", error);
     });
 });
 
@@ -620,27 +911,67 @@ function mapSpeakerLabel(label) {
 
 async function runGeminiAnalysis(speaker, text) {
     const prompt = `
-You are assisting in a recruiter interview.
-Speaker: ${speaker}
-Transcript: "${text}"
+        You are assisting in a recruiter interview.
+        Speaker: ${speaker}
+        Transcript: "${text}"
 
-Tasks:
-1. Summarize the intent of what the speaker said in one sentence.
-2. Extract semantic meaning (skills, experience, attitude).
-3. Suggest 1-2 recruiter follow-up questions based on this.
-Return JSON with fields: { "summary": "...", "semantics": "...", "questions": ["...", "..."] }.
-  `;
+        Tasks:
+        1. Summarize the intent of what the speaker said in one sentence.
+        2. Extract semantic meaning (skills, experience, attitude).
+        3. Suggest 1-2 recruiter follow-up questions based on this.
+        Return ONLY valid JSON with fields: { "summary": "...", "semantics": "...", "questions": ["...", "..."] }.
+        Do not include any markdown formatting or code blocks.
+    `;
 
     try {
         const resp = await model.generateContent(prompt);
         const raw = resp.response.text();
+
+        let cleanedRaw = raw.trim();
+
+        if (cleanedRaw.startsWith('```json')) {
+            cleanedRaw = cleanedRaw.replace(/```json\n?/, '');
+            cleanedRaw = cleanedRaw.replace(/\n?```$/, '');
+        } else if (cleanedRaw.startsWith('```')) {
+            cleanedRaw = cleanedRaw.replace(/```\n?/, '');
+            cleanedRaw = cleanedRaw.replace(/\n?```$/, '');
+        }
+
         let parsed;
         try {
-            parsed = JSON.parse(raw);
-        } catch {
-            parsed = { summary: raw, semantics: "", questions: [] };
+            parsed = JSON.parse(cleanedRaw);
+
+            if (!parsed.summary || !parsed.semantics || !parsed.questions) {
+                throw new Error('Invalid JSON structure');
+            }
+
+            return parsed;
+        } catch (parseError) {
+            console.error('[server] Failed to parse Gemini response as JSON:', parseError);
+            console.error('[server] Raw response:', raw);
+            console.error('[server] Cleaned response:', cleanedRaw);
+
+            const summaryMatch = cleanedRaw.match(/"summary"\s*:\s*"([^"]*)"/);
+            const semanticsMatch = cleanedRaw.match(/"semantics"\s*:\s*"([^"]*)"/);
+            const questionsMatch = cleanedRaw.match(/"questions"\s*:\s*\[([^\]]*)\]/);
+
+            const summary = summaryMatch ? summaryMatch[1] : raw.substring(0, 200);
+            const semantics = semanticsMatch ? semanticsMatch[1] : "";
+            let questions = [];
+
+            if (questionsMatch) {
+                try {
+                    questions = JSON.parse(`[${questionsMatch[1]}]`);
+                } catch (e) {
+                    const questionMatches = questionsMatch[1].match(/"([^"]*)"/g);
+                    if (questionMatches) {
+                        questions = questionMatches.map(match => match.replace(/^"|"$/g, ''));
+                    }
+                }
+            }
+
+            return { summary, semantics, questions };
         }
-        return parsed;
     } catch (err) {
         console.error("[server] Gemini error:", err);
         return { summary: "", semantics: "", questions: [] };
