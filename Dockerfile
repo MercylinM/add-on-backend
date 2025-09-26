@@ -2,7 +2,7 @@
 FROM node:18-alpine
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y pulseaudio sox libsox-fmt-all pulseaudio-utils
+RUN apk update && apk add --no-cache pulseaudio sox libsox-fmt-all pulseaudio-utils
 
 # Set the working directory in the container
 WORKDIR /usr/src/app
