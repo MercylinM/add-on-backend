@@ -1,27 +1,27 @@
-# Use the official Node.js runtime as the base image
+# Use Alpine Node base image
 FROM node:18-alpine
 
-# Install system dependencies
+# Install PulseAudio, Sox, ALSA and related utilities
 RUN apk update && apk add --no-cache \
     pulseaudio \
     sox \
     pulseaudio-utils \
     alsa-utils \
     alsa-lib \
-# Set the working directory in the container
-WORKDIR /usr/src/app
+    alsa-plugins-pulse \
+    bash
 
-# Copy package.json and package-lock.json (if available)
-COPY package*.json ./
+# Set the working directory
+WORKDIR /app
 
-# Install app dependencies
-RUN npm install
-
-# Copy the rest of the application code
+# Copy project files
 COPY . .
 
-# Expose the port the app runs on
-EXPOSE 3000
+# Install project dependencies
+RUN npm install
 
-# Define the command to run the application
-CMD [ "npm", "start" ]
+# Set environment variables for PulseAudio socket if needed
+ENV PULSE_SERVER=unix:/run/user/1000/pulse/native
+
+# Start your application
+CMD ["npm", "start"]
