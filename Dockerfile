@@ -21,7 +21,7 @@ COPY . .
 RUN npm install
 
 # Set environment variables for PulseAudio socket if needed
-ENV PULSE_SERVER=unix:/run/user/1000/pulse/native
+ENV PULSE_SERVER=unix:/run/user/1001/pulse/native
 
 # Start your application
 CMD ["npm", "start"]
