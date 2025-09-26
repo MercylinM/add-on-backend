@@ -9,7 +9,8 @@ RUN apk update && apk add --no-cache \
     alsa-utils \
     alsa-lib \
     alsa-plugins-pulse \
-    bash
+    bash \
+    dbus
 
 # Set the working directory
 WORKDIR /app
@@ -20,8 +21,14 @@ COPY . .
 # Install project dependencies
 RUN npm install
 
-# Set environment variables for PulseAudio socket if needed
-ENV PULSE_SERVER=unix:/run/user/1001/pulse/native
+# Copy entrypoint script
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-# Start your application
+ENTRYPOINT ["/entrypoint.sh"]
+
+
+# Start application
 CMD ["npm", "start"]
+
+
