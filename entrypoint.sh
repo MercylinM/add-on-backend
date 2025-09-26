@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Create dbus socket directory
+mkdir -p /var/run/dbus
+
 # Start dbus-daemon in system mode and background it
 dbus-daemon --system --fork
 
