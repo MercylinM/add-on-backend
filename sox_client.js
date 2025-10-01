@@ -5,10 +5,10 @@ import { EventEmitter } from "events";
 export class SoxClient extends EventEmitter {
     constructor(backendUrl = null, audioDevice = null, options = {}) {
         super();
-        
+
         this.backendUrl = backendUrl || process.env.BACKEND_WS_URL || "ws://localhost:3000";
         this.audioDevice = audioDevice || process.env.AUDIO_DEVICE || "default";
-        
+
         this.ws = null;
         this.isConnected = false;
         this.connectionAttempts = 0;
@@ -16,13 +16,13 @@ export class SoxClient extends EventEmitter {
         this.reconnectInterval = options.reconnectInterval || 5000;
         this.reconnectTimer = null;
         this.shouldReconnect = true;
-        
+
         this.audioProcess = null;
         this.parecProcess = null;
         this.isCapturing = false;
         this.bytesTransmitted = 0;
         this.lastActivityTime = Date.now();
-        
+
         this.config = {
             audioFormat: {
                 format: 's16le',
@@ -32,12 +32,12 @@ export class SoxClient extends EventEmitter {
                 encoding: 'signed-integer'
             },
             bufferSize: options.bufferSize || 4096,
-            reconnectBackoff: options.reconnectBackoff || 'exponential', 
+            reconnectBackoff: options.reconnectBackoff || 'exponential',
             heartbeatInterval: options.heartbeatInterval || 30000,
-            maxSilenceTime: options.maxSilenceTime || 300000, 
+            maxSilenceTime: options.maxSilenceTime || 300000,
             enableMetrics: options.enableMetrics !== false
         };
-        
+
         this.metrics = {
             startTime: null,
             connectionCount: 0,
@@ -47,10 +47,10 @@ export class SoxClient extends EventEmitter {
             wsErrors: 0,
             lastError: null
         };
-        
+
         this.heartbeatTimer = null;
         this.lastPong = Date.now();
-        
+
         this.setupEventHandlers();
     }
 
@@ -77,14 +77,16 @@ export class SoxClient extends EventEmitter {
         try {
             const wsUrl = `${this.backendUrl}/ws/audio`;
             console.log(`[sox-client] Connecting to WebSocket at: ${wsUrl} (attempt ${this.connectionAttempts + 1})`);
-            
+
             this.ws = new WebSocket(wsUrl, {
                 handshakeTimeout: 10000,
                 perMessageDeflate: false
             });
 
+            this.ws.binaryType = 'nodebuffer';
+
             this.setupWebSocketHandlers();
-            
+
         } catch (error) {
             console.error('[sox-client] Connection error:', error);
             this.handleConnectionError(error);
@@ -123,7 +125,7 @@ export class SoxClient extends EventEmitter {
         this.connectionAttempts = 0;
         this.metrics.connectionCount++;
         this.metrics.startTime = this.metrics.startTime || Date.now();
-        
+
         this.emit('connected');
         this.startHeartbeat();
         this.startAudioCapture();
@@ -132,11 +134,11 @@ export class SoxClient extends EventEmitter {
     onDisconnected() {
         this.isConnected = false;
         this.metrics.disconnectionCount++;
-        
+
         this.stopHeartbeat();
         this.stopAudioCapture();
         this.emit('disconnected');
-        
+
         if (this.shouldReconnect && this.connectionAttempts < this.maxReconnectAttempts) {
             this.scheduleReconnect();
         } else if (this.connectionAttempts >= this.maxReconnectAttempts) {
@@ -149,7 +151,7 @@ export class SoxClient extends EventEmitter {
         this.connectionAttempts++;
         this.metrics.wsErrors++;
         this.metrics.lastError = error;
-        
+
         if (this.shouldReconnect && this.connectionAttempts < this.maxReconnectAttempts) {
             this.scheduleReconnect();
         } else {
@@ -163,16 +165,16 @@ export class SoxClient extends EventEmitter {
         }
 
         let delay = this.reconnectInterval;
-        
+
         if (this.config.reconnectBackoff === 'exponential') {
             delay = Math.min(
                 this.reconnectInterval * Math.pow(2, this.connectionAttempts - 1),
-                60000 // Max 1 minute
+                60000
             );
         }
 
         console.log(`[sox-client] Scheduling reconnect in ${delay}ms (attempt ${this.connectionAttempts + 1}/${this.maxReconnectAttempts})`);
-        
+
         this.reconnectTimer = setTimeout(() => {
             this.attemptConnection();
         }, delay);
@@ -184,7 +186,7 @@ export class SoxClient extends EventEmitter {
             console.log("[sox-client] Received message:", data.message_type || 'unknown');
             this.emit('message', data);
         } catch (parseError) {
-            if (msg instanceof Buffer) {
+            if (Buffer.isBuffer(msg)) {
                 console.log("[sox-client] Received binary data, length:", msg.length);
                 this.emit('binaryMessage', msg);
             } else {
@@ -202,7 +204,7 @@ export class SoxClient extends EventEmitter {
         this.heartbeatTimer = setInterval(() => {
             if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
                 this.ws.ping();
-                
+
                 const timeSinceLastPong = Date.now() - this.lastPong;
                 if (timeSinceLastPong > this.config.heartbeatInterval * 2) {
                     console.warn('[sox-client] Heartbeat timeout, reconnecting...');
@@ -226,7 +228,7 @@ export class SoxClient extends EventEmitter {
         }
 
         console.log(`[sox-client] Starting audio capture for device: ${this.audioDevice}`);
-        
+
         try {
             if (this.audioDevice.startsWith("pulseaudio:")) {
                 this.startPulseAudioCapture();
@@ -235,10 +237,10 @@ export class SoxClient extends EventEmitter {
             } else {
                 this.startDefaultCapture();
             }
-            
+
             this.isCapturing = true;
             this.emit('captureStarted');
-            
+
         } catch (error) {
             console.error('[sox-client] Failed to start audio capture:', error);
             this.metrics.audioErrors++;
@@ -252,24 +254,24 @@ export class SoxClient extends EventEmitter {
         }
 
         console.log('[sox-client] Stopping audio capture');
-        
+
         if (this.parecProcess) {
             this.parecProcess.kill('SIGTERM');
             this.parecProcess = null;
         }
-        
+
         if (this.audioProcess) {
             this.audioProcess.kill('SIGTERM');
             this.audioProcess = null;
         }
-        
+
         this.isCapturing = false;
         this.emit('captureStopped');
     }
 
     createAudioProcess(command, args, processName) {
         console.log(`[sox-client] ${processName} command: ${command} ${args.join(" ")}`);
-        
+
         const process = spawn(command, args, {
             stdio: ['pipe', 'pipe', 'pipe']
         });
@@ -284,7 +286,7 @@ export class SoxClient extends EventEmitter {
         process.on("close", (code, signal) => {
             console.log(`[sox-client] ${processName} closed with code ${code}, signal ${signal}`);
             this.emit('processExit', { process: processName, code, signal });
-            
+
             if (code !== 0 && this.isCapturing) {
                 console.error(`[sox-client] ${processName} exited unexpectedly, attempting to restart audio capture`);
                 setTimeout(() => {
@@ -386,24 +388,30 @@ export class SoxClient extends EventEmitter {
         }
 
         let silenceTimer = null;
-        
+
         this.audioProcess.stdout.on("data", (chunk) => {
             if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
-                this.ws.send(chunk);
-                this.bytesTransmitted += chunk.length;
-                this.metrics.bytesTransmitted += chunk.length;
-                this.lastActivityTime = Date.now();
-                
-                if (silenceTimer) {
-                    clearTimeout(silenceTimer);
+                try {
+                    this.ws.send(chunk, { binary: true, compress: false });
+                    this.bytesTransmitted += chunk.length;
+                    this.metrics.bytesTransmitted += chunk.length;
+                    this.lastActivityTime = Date.now();
+
+                    if (silenceTimer) {
+                        clearTimeout(silenceTimer);
+                    }
+
+                    silenceTimer = setTimeout(() => {
+                        console.log('[sox-client] No audio data for extended period, checking connection...');
+                        this.emit('silenceDetected');
+                    }, this.config.maxSilenceTime);
+
+                    this.emit('audioData', chunk);
+                } catch (sendError) {
+                    console.error('[sox-client] Error sending audio data:', sendError);
+                    this.metrics.wsErrors++;
+                    this.emit('wsError', sendError);
                 }
-                
-                silenceTimer = setTimeout(() => {
-                    console.log('[sox-client] No audio data for extended period, checking connection...');
-                    this.emit('silenceDetected');
-                }, this.config.maxSilenceTime);
-                
-                this.emit('audioData', chunk);
             }
         });
     }
@@ -411,7 +419,7 @@ export class SoxClient extends EventEmitter {
     restartAudioCapture() {
         console.log('[sox-client] Restarting audio capture...');
         this.stopAudioCapture();
-        
+
         setTimeout(() => {
             if (this.isConnected) {
                 this.startAudioCapture();
@@ -422,33 +430,33 @@ export class SoxClient extends EventEmitter {
     disconnect() {
         console.log('[sox-client] Disconnecting...');
         this.shouldReconnect = false;
-        
+
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = null;
         }
-        
+
         this.stopHeartbeat();
         this.stopAudioCapture();
-        
+
         if (this.ws) {
             this.ws.close(1000, 'Normal closure');
             this.ws = null;
         }
-        
+
         this.emit('disconnected');
     }
 
     async gracefulShutdown() {
         console.log('\n[sox-client] Shutting down gracefully...');
-        
+
         this.shouldReconnect = false;
         this.stopAudioCapture();
-        
+
         if (this.ws) {
             this.ws.close(1000, 'Shutting down');
         }
-        
+
         setTimeout(() => {
             process.exit(0);
         }, 2000);
@@ -485,19 +493,19 @@ export class SoxClient extends EventEmitter {
 
     setAudioDevice(device) {
         const wasCapturing = this.isCapturing;
-        
+
         if (wasCapturing) {
             this.stopAudioCapture();
         }
-        
+
         this.audioDevice = device;
-        
+
         if (wasCapturing && this.isConnected) {
             setTimeout(() => {
                 this.startAudioCapture();
             }, 1000);
         }
-        
+
         this.emit('deviceChanged', device);
     }
 }
@@ -505,38 +513,38 @@ export class SoxClient extends EventEmitter {
 if (import.meta.url === `file://${process.argv[1]}`) {
     const audioDevice = process.argv[2] || "default";
     const backendUrl = process.argv[3] || "ws://localhost:3000";
-    
+
     console.log('[sox-client] Starting SoxClient...');
     console.log(`[sox-client] Audio device: ${audioDevice}`);
     console.log(`[sox-client] Backend URL: ${backendUrl}`);
-    
+
     const client = new SoxClient(backendUrl, audioDevice, {
         maxReconnectAttempts: 20,
         reconnectInterval: 3000,
         reconnectBackoff: 'exponential',
         enableMetrics: true
     });
-    
+
     client.on('connected', () => {
         console.log('[sox-client] Connected to server');
     });
-    
+
     client.on('disconnected', () => {
         console.log('[sox-client] Disconnected from server');
     });
-    
+
     client.on('captureStarted', () => {
         console.log('[sox-client] Audio capture started');
     });
-    
+
     client.on('captureStopped', () => {
         console.log('[sox-client] Audio capture stopped');
     });
-    
+
     client.on('error', (error) => {
         console.error('[sox-client] Error:', error);
     });
-    
+
     client.on('message', (data) => {
         if (data.message_type === 'enriched_transcript') {
             console.log(`[sox-client] 📝 ${data.speaker_name}: ${data.transcript}`);
@@ -545,13 +553,13 @@ if (import.meta.url === `file://${process.argv[1]}`) {
             }
         }
     });
-    
+
     setInterval(() => {
         const metrics = client.getMetrics();
         if (metrics.bytesTransmitted > 0) {
             console.log(`[sox-client] 📊 Metrics: ${Math.round(metrics.bytesTransmitted / 1024)}KB transmitted, ${metrics.connectionCount} connections, ${metrics.audioErrors} audio errors`);
         }
     }, 30000);
-    
+
     client.connect().catch(console.error);
 }

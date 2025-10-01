@@ -1384,8 +1384,18 @@ class EnhancedSpeechProcessor {
         }
 
         try {
-            return JSON.parse(Buffer.from(base64Credentials, 'base64').toString('utf8'));
+            const decoded = JSON.parse(Buffer.from(base64Credentials, 'base64').toString('utf8'));
+
+            console.log('[speech] Loaded credentials for project:', decoded.project_id);
+            console.log('[speech] Client email:', decoded.client_email);
+
+            if (!decoded.project_id || !decoded.private_key || !decoded.client_email) {
+                throw new Error('Incomplete credentials JSON');
+            }
+
+            return decoded;
         } catch (error) {
+            console.error('[speech] Credentials error:', error);
             throw new ServerError('Invalid Google Cloud credentials format', 500);
         }
     }
@@ -2066,15 +2076,56 @@ app.get('/api/metrics', (req, res) => {
     });
 });
 
+app.get('/api/test-google-speech', async (req, res) => {
+    try {
+        const testClient = new speech.SpeechClient({
+            credentials: enhancedSpeechProcessor.credentials
+        });
+
+        // Simple synchronous recognition test
+        const audio = {
+            content: Buffer.from([]).toString('base64'),
+        };
+
+        const config = {
+            encoding: 'LINEAR16',
+            sampleRateHertz: 16000,
+            languageCode: 'en-US',
+        };
+
+        const request = { audio, config };
+
+        const [response] = await testClient.recognize(request);
+        res.json({ success: true, message: 'Google Speech API is reachable' });
+
+    } catch (error) {
+        res.status(500).json({
+            success: false,
+            error: error.message,
+            code: error.code,
+            details: error.details
+        });
+    }
+});
+
 // =============== Enhanced WebSocket Server ===============
 const server = http.createServer(app);
-const audioWss = new WebSocketServer({ server, path: "/ws/audio" });
-const transcriptWss = new WebSocketServer({ server, path: "/ws/transcripts" });
+const audioWss = new WebSocketServer({
+    server,
+    path: "/ws/audio",
+    perMessageDeflate: false
+});
+
+const transcriptWss = new WebSocketServer({
+    server,
+    path: "/ws/transcripts",
+    perMessageDeflate: false
+});
 
 audioWss.on("connection", (client, req) => {
-    const origin = req.headers.origin;
+    const origin = req.headers.origin || 'local';
 
-    if (origin && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
+    if (origin !== 'local' && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
         console.log('[server] Audio WS connection rejected from origin:', origin);
         client.close(1008, 'Origin not allowed');
         return;
@@ -2090,14 +2141,14 @@ audioWss.on("connection", (client, req) => {
             enhancedSpeechProcessor.startStream();
         }
 
-        let audioStream = enhancedSpeechProcessor.createAudioStream();
+        const audioStream = enhancedSpeechProcessor.createAudioStream();
 
         client.on("message", (msg) => {
             try {
-                if (msg instanceof Buffer) {
+                if (Buffer.isBuffer(msg)) {
                     audioStream.write(msg);
 
-                    if (client.readyState === 1) { 
+                    if (client.readyState === WebSocket.OPEN) {
                         client.send(JSON.stringify({
                             type: 'audio_ack',
                             timestamp: Date.now(),
@@ -2137,6 +2188,8 @@ audioWss.on("connection", (client, req) => {
             console.error("[server] Audio WS error:", error);
             wsManager.removeClient(client);
         });
+
+        client.binaryType = 'arraybuffer';
 
     } catch (error) {
         console.error('[server] Error setting up audio client:', error);
