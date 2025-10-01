@@ -9,7 +9,6 @@ export class SoxClient extends EventEmitter {
         this.backendUrl = backendUrl || process.env.BACKEND_WS_URL || "ws://localhost:3000";
         this.audioDevice = audioDevice || process.env.AUDIO_DEVICE || "default";
         
-        // WebSocket properties
         this.ws = null;
         this.isConnected = false;
         this.connectionAttempts = 0;
@@ -18,14 +17,12 @@ export class SoxClient extends EventEmitter {
         this.reconnectTimer = null;
         this.shouldReconnect = true;
         
-        // Audio processing properties
         this.audioProcess = null;
         this.parecProcess = null;
         this.isCapturing = false;
         this.bytesTransmitted = 0;
         this.lastActivityTime = Date.now();
         
-        // Configuration
         this.config = {
             audioFormat: {
                 format: 's16le',
@@ -35,13 +32,12 @@ export class SoxClient extends EventEmitter {
                 encoding: 'signed-integer'
             },
             bufferSize: options.bufferSize || 4096,
-            reconnectBackoff: options.reconnectBackoff || 'exponential', // linear, exponential
+            reconnectBackoff: options.reconnectBackoff || 'exponential', 
             heartbeatInterval: options.heartbeatInterval || 30000,
-            maxSilenceTime: options.maxSilenceTime || 300000, // 5 minutes
+            maxSilenceTime: options.maxSilenceTime || 300000, 
             enableMetrics: options.enableMetrics !== false
         };
         
-        // Metrics
         this.metrics = {
             startTime: null,
             connectionCount: 0,
@@ -52,7 +48,6 @@ export class SoxClient extends EventEmitter {
             lastError: null
         };
         
-        // Heartbeat
         this.heartbeatTimer = null;
         this.lastPong = Date.now();
         
@@ -60,7 +55,6 @@ export class SoxClient extends EventEmitter {
     }
 
     setupEventHandlers() {
-        // Handle process termination gracefully
         process.on('SIGINT', () => this.gracefulShutdown());
         process.on('SIGTERM', () => this.gracefulShutdown());
         process.on('uncaughtException', (error) => {
@@ -209,7 +203,6 @@ export class SoxClient extends EventEmitter {
             if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
                 this.ws.ping();
                 
-                // Check if we've received a pong recently
                 const timeSinceLastPong = Date.now() - this.lastPong;
                 if (timeSinceLastPong > this.config.heartbeatInterval * 2) {
                     console.warn('[sox-client] Heartbeat timeout, reconnecting...');
@@ -401,7 +394,6 @@ export class SoxClient extends EventEmitter {
                 this.metrics.bytesTransmitted += chunk.length;
                 this.lastActivityTime = Date.now();
                 
-                // Reset silence timer
                 if (silenceTimer) {
                     clearTimeout(silenceTimer);
                 }
@@ -457,13 +449,11 @@ export class SoxClient extends EventEmitter {
             this.ws.close(1000, 'Shutting down');
         }
         
-        // Wait a bit for cleanup
         setTimeout(() => {
             process.exit(0);
         }, 2000);
     }
 
-    // Utility methods
     getMetrics() {
         return {
             ...this.metrics,
@@ -488,7 +478,6 @@ export class SoxClient extends EventEmitter {
         };
     }
 
-    // Configuration methods
     updateConfig(newConfig) {
         this.config = { ...this.config, ...newConfig };
         this.emit('configUpdated', this.config);
@@ -513,7 +502,6 @@ export class SoxClient extends EventEmitter {
     }
 }
 
-// Command-line interface
 if (import.meta.url === `file://${process.argv[1]}`) {
     const audioDevice = process.argv[2] || "default";
     const backendUrl = process.argv[3] || "ws://localhost:3000";
@@ -529,25 +517,24 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         enableMetrics: true
     });
     
-    // Event listeners for debugging
     client.on('connected', () => {
-        console.log('[sox-client] ✅ Connected to server');
+        console.log('[sox-client] Connected to server');
     });
     
     client.on('disconnected', () => {
-        console.log('[sox-client] ❌ Disconnected from server');
+        console.log('[sox-client] Disconnected from server');
     });
     
     client.on('captureStarted', () => {
-        console.log('[sox-client] 🎤 Audio capture started');
+        console.log('[sox-client] Audio capture started');
     });
     
     client.on('captureStopped', () => {
-        console.log('[sox-client] ⏹️  Audio capture stopped');
+        console.log('[sox-client] Audio capture stopped');
     });
     
     client.on('error', (error) => {
-        console.error('[sox-client] ❌ Error:', error);
+        console.error('[sox-client] Error:', error);
     });
     
     client.on('message', (data) => {
@@ -559,7 +546,6 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         }
     });
     
-    // Periodic metrics logging
     setInterval(() => {
         const metrics = client.getMetrics();
         if (metrics.bytesTransmitted > 0) {
@@ -567,6 +553,5 @@ if (import.meta.url === `file://${process.argv[1]}`) {
         }
     }, 30000);
     
-    // Start the client
     client.connect().catch(console.error);
 }

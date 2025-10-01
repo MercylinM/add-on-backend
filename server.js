@@ -1003,7 +1003,7 @@ dotenv.config();
 
 import express from "express";
 import bodyParser from "body-parser";
-import { WebSocketServer } from "ws";
+import { WebSocket, WebSocketServer } from "ws"; 
 import http from "http";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import speech from "@google-cloud/speech";
@@ -1034,9 +1034,9 @@ const CONFIG = {
         model: 'latest_long'
     },
     BUFFER: {
-        minSegmentLength: 30,    // Reduced for more responsive analysis
-        maxSegmentLength: 400,   // Slightly reduced for better UX
-        silenceThresholdMs: 2000 // Reduced for faster analysis
+        minSegmentLength: 30,    
+        maxSegmentLength: 400,   
+        silenceThresholdMs: 2000 
     },
     CORS: {
         allowedOrigins: [
@@ -2071,7 +2071,6 @@ const server = http.createServer(app);
 const audioWss = new WebSocketServer({ server, path: "/ws/audio" });
 const transcriptWss = new WebSocketServer({ server, path: "/ws/transcripts" });
 
-// Audio WebSocket for receiving audio data
 audioWss.on("connection", (client, req) => {
     const origin = req.headers.origin;
 
@@ -2082,49 +2081,69 @@ audioWss.on("connection", (client, req) => {
     }
 
     console.log("[server] Audio WS connected from", origin);
-    wsManager.addAudioClient(client);
 
-    let audioStream = enhancedSpeechProcessor.createAudioStream();
+    try {
+        wsManager.addAudioClient(client);
 
-    client.on("message", (msg) => {
-        try {
-            if (msg instanceof Buffer) {
-                audioStream.write(msg);
-
-                if (client.readyState === WebSocket.OPEN) {
-                    client.send(JSON.stringify({
-                        type: 'audio_ack',
-                        timestamp: Date.now(),
-                        bytes_received: msg.length
-                    }));
-                }
-            } else if (typeof msg === 'string') {
-                const data = JSON.parse(msg);
-                if (data.type === 'ping') {
-                    client.send(JSON.stringify({
-                        type: 'pong',
-                        timestamp: data.timestamp
-                    }));
-                }
-            }
-        } catch (error) {
-            ErrorHandler.handleWebSocketError(error, client, 'audio');
+        if (wsManager.audioClients.size === 1 && !enhancedSpeechProcessor.isStreamAlive) {
+            console.log('[server] Starting speech stream for first client');
+            enhancedSpeechProcessor.startStream();
         }
-    });
 
-    client.on("close", () => {
-        console.log("[server] Audio WS closed");
-        wsManager.removeClient(client);
-        audioStream.end();
-    });
+        let audioStream = enhancedSpeechProcessor.createAudioStream();
 
-    client.on("error", (error) => {
-        console.error("[server] Audio WS error:", error);
-        wsManager.removeClient(client);
-    });
+        client.on("message", (msg) => {
+            try {
+                if (msg instanceof Buffer) {
+                    audioStream.write(msg);
+
+                    if (client.readyState === 1) { 
+                        client.send(JSON.stringify({
+                            type: 'audio_ack',
+                            timestamp: Date.now(),
+                            bytes_received: msg.length
+                        }));
+                    }
+                } else if (typeof msg === 'string') {
+                    const data = JSON.parse(msg);
+                    if (data.type === 'ping') {
+                        client.send(JSON.stringify({
+                            type: 'pong',
+                            timestamp: data.timestamp
+                        }));
+                    }
+                }
+            } catch (error) {
+                console.error('[server] Error processing audio message:', error);
+                ErrorHandler.handleWebSocketError(error, client, 'audio');
+            }
+        });
+
+        client.on("close", (code, reason) => {
+            console.log(`[server] Audio WS closed: ${code} - ${reason}`);
+            wsManager.removeClient(client);
+
+            if (audioStream) {
+                audioStream.end();
+            }
+
+            if (wsManager.audioClients.size === 0) {
+                console.log('[server] No more audio clients, stopping speech stream');
+                enhancedSpeechProcessor.cleanup();
+            }
+        });
+
+        client.on("error", (error) => {
+            console.error("[server] Audio WS error:", error);
+            wsManager.removeClient(client);
+        });
+
+    } catch (error) {
+        console.error('[server] Error setting up audio client:', error);
+        client.close(1011, 'Internal server error');
+    }
 });
 
-// Transcript WebSocket for sending transcripts to frontend
 transcriptWss.on("connection", (client, req) => {
     const origin = req.headers.origin;
 
@@ -2188,16 +2207,15 @@ const startServer = async () => {
     }
 };
 
-// =============== Graceful Shutdown ===============
+// ===============  Shutdown ===============
 const gracefulShutdown = async () => {
-    console.log('\n[server] Shutting down gracefully...');
+    console.log('\n[server] Shutting down...');
 
     try {
         if (audioDeviceManager.getStatus().running) {
             await audioDeviceManager.stop();
         }
 
-        // Close WebSocket connections
         const closePromises = [];
         wsManager.audioClients.forEach((client) => {
             client.close(1001, 'Server shutting down');
@@ -2206,7 +2224,6 @@ const gracefulShutdown = async () => {
             client.close(1001, 'Server shutting down');
         });
 
-        // Close HTTP server
         server.close(() => {
             console.log('[server] HTTP server closed');
             process.exit(0);
@@ -2232,5 +2249,4 @@ process.on('unhandledRejection', (reason, promise) => {
     console.error('Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// Start the server
 startServer();
