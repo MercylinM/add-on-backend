@@ -13,6 +13,7 @@ import { exec } from 'child_process';
 import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fetch from 'node-fetch';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -44,6 +45,11 @@ const CONFIG = {
             'http://localhost:3000'
         ]
     }
+};
+
+const BOT_CONFIG = {
+    BOT_SERVICE_URL: process.env.BOT_SERVICE_URL || 'https://gmeet-bot.onrender.com',
+    DEFAULT_DURATION: 60
 };
 
 // =============== Error Handling & Validation ===============
@@ -403,11 +409,11 @@ class SpeechProcessor {
             .on('end', () => this.handleStreamEnd());
 
         this.streamTimeout = setTimeout(() => {
-            console.log('[speech-stream] Restarting due to time limit');
+            // console.log('[speech-stream] Restarting due to time limit');
             this.restartStream();
         }, CONFIG.SPEECH.streamingLimit);
 
-        console.log(`[speech-stream] Stream started (restart counter: ${this.restartCounter})`);
+        // console.log(`[speech-stream] Stream started (restart counter: ${this.restartCounter})`);
     }
 
     resetStreamState() {
@@ -435,23 +441,23 @@ class SpeechProcessor {
     }
 
     handleStreamError(err) {
-        console.error('[speech-stream] API error:', err);
+        // console.error('[speech-stream] API error:', err);
         this.isStreamAlive = false;
 
         if (!this.pendingRestart) {
             this.pendingRestart = true;
             if (err.code === 11) { 
-                console.log('[speech-stream] Restarting due to timeout');
+                // console.log('[speech-stream] Restarting due to timeout');
                 this.restartStream();
             } else {
-                console.error('[speech-stream] Non-timeout error:', err);
+                // console.error('[speech-stream] Non-timeout error:', err);
                 setTimeout(() => this.restartStream(), 1000);
             }
         }
     }
 
     handleStreamEnd() {
-        console.log('[speech-stream] Stream ended naturally');
+        // console.log('[speech-stream] Stream ended naturally');
         this.isStreamAlive = false;
 
         if (!this.pendingRestart) {
@@ -464,7 +470,7 @@ class SpeechProcessor {
         if (this.pendingRestart) return;
 
         this.pendingRestart = true;
-        console.log(`[speech-stream] Restarting stream (counter: ${this.restartCounter})`);
+        // console.log(`[speech-stream] Restarting stream (counter: ${this.restartCounter})`);
 
         if (this.streamTimeout) {
             clearTimeout(this.streamTimeout);
@@ -515,7 +521,7 @@ class SpeechProcessor {
                 const mappedSpeaker = this.mapSpeakerLabel(`${speakerTag}`);
 
                 if (isFinal) {
-                    console.log(`[speech-stream] ${correctedTime}: ${mappedSpeaker} - ${transcript}`);
+                    // console.log(`[speech-stream] ${correctedTime}: ${mappedSpeaker} - ${transcript}`);
 
                     if (!this.speakerBuffer[mappedSpeaker]) {
                         this.speakerBuffer[mappedSpeaker] = '';
@@ -564,7 +570,7 @@ class SpeechProcessor {
                 }
             }
         } catch (error) {
-            console.error('[speech-stream] Error processing speech callback:', error);
+            // console.error('[speech-stream] Error processing speech callback:', error);
         }
     }
 
@@ -618,13 +624,13 @@ class SpeechProcessor {
 
                     next();
                 } catch (error) {
-                    console.error('[speech-stream] Error writing to stream:', error);
+                    // console.error('[speech-stream] Error writing to stream:', error);
                     next();
                 }
             },
 
             final() {
-                console.log('[speech-stream] Audio stream ended');
+                // console.log('[speech-stream] Audio stream ended');
             }
         });
     }
@@ -686,7 +692,7 @@ class GeminiAnalyzer {
             return this.parseResponse(raw);
         } catch (err) {
             this.errorCount++;
-            console.error("[gemini] Analysis error:", err);
+            // console.error("[gemini] Analysis error:", err);
             return this.getFallbackResponse();
         }
     }
@@ -719,8 +725,8 @@ class GeminiAnalyzer {
             };
 
         } catch (parseError) {
-            console.error('[gemini] Failed to parse response:', parseError);
-            console.error('[gemini] Raw response:', raw);
+            // console.error('[gemini] Failed to parse response:', parseError);
+            // console.error('[gemini] Raw response:', raw);
 
             return this.extractFallbackData(cleanedRaw, raw);
         }
@@ -773,6 +779,88 @@ class GeminiAnalyzer {
         };
     }
 }
+
+class BotManager {
+    constructor() {
+        this.status = 'idle'; 
+        this.currentMeeting = null;
+        this.startTime = null;
+    }
+
+    async startBot(meetLink, duration = BOT_CONFIG.DEFAULT_DURATION) {
+        if (this.status === 'running' || this.status === 'starting') {
+            throw new ServerError('Bot is already running', 400);
+        }
+
+        try {
+            this.status = 'starting';
+            this.currentMeeting = meetLink;
+
+            console.log(`[bot-manager] Starting bot for meeting: ${meetLink}`);
+
+            // The bot service is deployed on Render as a Background Worker
+            // It automatically starts when deployed, so we trigger it via environment variable update
+            // Or if you have a webhook/API on the bot service:
+
+            // For now, we'll just track status since the bot auto-joins
+            // You may need to implement a trigger mechanism based on your deployment
+
+            this.status = 'running';
+            this.startTime = Date.now();
+
+            console.log(`[bot-manager] Bot status set to running`);
+
+            return {
+                success: true,
+                status: 'running',
+                meetLink: this.currentMeeting,
+                message: 'Bot is joining the meeting'
+            };
+
+        } catch (error) {
+            console.error('[bot-manager] Failed to start bot:', error);
+            this.status = 'error';
+            throw new ServerError(`Failed to start bot: ${error.message}`, 500);
+        }
+    }
+
+    async stopBot() {
+        if (this.status === 'idle') {
+            return {
+                success: true,
+                message: 'Bot is not running'
+            };
+        }
+
+        try {
+            console.log('[bot-manager] Stopping bot');
+
+            this.status = 'idle';
+            this.currentMeeting = null;
+            this.startTime = null;
+
+            return {
+                success: true,
+                message: 'Bot stopped successfully'
+            };
+
+        } catch (error) {
+            console.error('[bot-manager] Failed to stop bot:', error);
+            throw new ServerError(`Failed to stop bot: ${error.message}`, 500);
+        }
+    }
+
+    getStatus() {
+        return {
+            status: this.status,
+            isRunning: this.status === 'running',
+            currentMeeting: this.currentMeeting,
+            uptime: this.startTime ? Math.floor((Date.now() - this.startTime) / 1000) : 0
+        };
+    }
+}
+
+const botManager = new BotManager();
 
 // =============== API Routes ===============
 app.post("/participant-map", (req, res, next) => {
@@ -828,15 +916,117 @@ app.get("/api/analytics", (req, res) => {
         success: true,
         gemini: geminiAnalyzer.getStats(),
         participants: participantManager.getAll(),
-        sox: audioDeviceManager.getStatus()
+        sox: audioDeviceManager.getStatus(),
+        bot: botManager.getStatus(),
+        connections: {
+            audioClients: wss.clients.size,
+            transcriptClients: transcriptWss.clients.size
+        }
     });
+});
+
+app.post("/api/bot/start", async (req, res, next) => {
+    try {
+        const { meetLink, duration = BOT_CONFIG.DEFAULT_DURATION } = req.body;
+
+        if (!meetLink) {
+            throw new ServerError('Meeting link is required', 400);
+        }
+
+        const result = await botManager.startBot(meetLink, duration);
+        res.json(result);
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.post("/api/bot/stop", async (req, res, next) => {
+    try {
+        const result = await botManager.stopBot();
+        res.json(result);
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.get("/api/bot/status", (req, res) => {
+    res.json({
+        success: true,
+        ...botManager.getStatus()
+    });
+});
+
+app.post("/api/session/start", async (req, res) => {
+    try {
+        const { meetingId, participants } = req.body;
+        console.log(`[session] Starting session for meeting: ${meetingId}`);
+
+        // You can add session tracking logic here
+
+        res.json({
+            success: true,
+            message: 'Session started'
+        });
+    } catch (error) {
+        console.error('[session] Error starting session:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+app.post("/api/session/end", async (req, res) => {
+    try {
+        const { meetingId } = req.body;
+        console.log(`[session] Ending session for meeting: ${meetingId}`);
+
+        res.json({
+            success: true,
+            message: 'Session ended'
+        });
+    } catch (error) {
+        console.error('[session] Error ending session:', error);
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // =============== WebSocket Server ===============
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws/audio" });
-
+const transcriptWss = new WebSocketServer({ server, path: "/ws/transcripts" });
 const speechProcessor = new SpeechProcessor();
+
+transcriptWss.on("connection", (client, req) => {
+    const origin = req.headers.origin;
+
+    if (origin && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
+        console.log('[server] Transcript WS connection rejected from origin:', origin);
+        client.close(1008, 'Origin not allowed');
+        return;
+    }
+
+    console.log("[server] Add-on transcript WS connected from", origin);
+
+    client.on("error", (error) => {
+        console.error("[server] Transcript WebSocket client error:", error);
+    });
+
+    client.on("close", () => {
+        console.log("[server] Add-on transcript WS closed");
+    });
+});
+
+function broadcastToTranscriptClients(data) {
+    transcriptWss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            try {
+                client.send(JSON.stringify(data));
+            } catch (error) {
+                console.error('[server] Error sending to transcript client:', error);
+            }
+        }
+    });
+}
+
+
 
 speechProcessor.on('transcript', (data) => {
     const { transcript, speaker, speakerTag, isFinal, timestamp } = data;
@@ -856,6 +1046,8 @@ speechProcessor.on('transcript', (data) => {
             client.send(JSON.stringify(transcriptData));
         }
     });
+
+    broadcastToTranscriptClients(transcriptData);
 });
 
 speechProcessor.on('analysis', async (data) => {
@@ -872,7 +1064,8 @@ speechProcessor.on('analysis', async (data) => {
             message_type: "enriched_transcript",
             end_of_turn: true,
             timestamp: timestamp,
-            is_final: true
+            is_final: true,
+            analysis_timestamp: Date.now()
         };
 
         wss.clients.forEach(client => {
@@ -880,6 +1073,8 @@ speechProcessor.on('analysis', async (data) => {
                 client.send(JSON.stringify(enriched));
             }
         });
+
+        broadcastToTranscriptClients(enriched);
     } catch (error) {
         console.error('[server] Error in Gemini analysis:', error);
     }
@@ -889,7 +1084,7 @@ wss.on("connection", (client, req) => {
     const origin = req.headers.origin;
 
     if (origin && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
-        console.log('[server] WebSocket connection rejected from origin:', origin);
+        // console.log('[server] WebSocket connection rejected from origin:', origin);
         client.close(1008, 'Origin not allowed');
         return;
     }
@@ -911,12 +1106,12 @@ wss.on("connection", (client, req) => {
                 audioStream.write(msg);
             }
         } catch (error) {
-            console.error('[server] Error processing audio message:', error);
+            // console.error('[server] Error processing audio message:', error);
         }
     });
 
     client.on("close", () => {
-        console.log("[server] Bot WS closed");
+        // console.log("[server] Bot WS closed");
         if (audioStream) {
             audioStream.end();
         }
@@ -960,7 +1155,7 @@ const startServer = async () => {
 
 // =============== Graceful Shutdown ===============
 const gracefulShutdown = async () => {
-    console.log('\n[server] Shutting down gracefully...');
+    console.log('\n[server] Shutting down...');
 
     try {
         if (audioDeviceManager.getStatus().running) {
@@ -972,17 +1167,17 @@ const gracefulShutdown = async () => {
         });
 
         server.close(() => {
-            console.log('[server] HTTP server closed');
+            // console.log('[server] HTTP server closed');
             process.exit(0);
         });
 
         setTimeout(() => {
-            console.log('[server] Force exit');
+            // console.log('[server] Force exit');
             process.exit(1);
         }, 10000);
 
     } catch (error) {
-        console.error('[server] Error during shutdown:', error);
+        // console.error('[server] Error during shutdown:', error);
         process.exit(1);
     }
 };
