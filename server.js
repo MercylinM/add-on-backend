@@ -832,7 +832,6 @@ class BotManager {
         }
     }
 
-
     async stopBot() {
         if (this.status === 'idle') {
             return {
@@ -939,15 +938,32 @@ app.post("/api/bot/start", async (req, res, next) => {
         const { meetLink, duration = BOT_CONFIG.DEFAULT_DURATION } = req.body;
 
         if (!meetLink) {
-            throw new ServerError('Meeting link is required', 400);
+            return res.status(400).json({ success: false, message: "Meeting link is required" });
         }
 
         const result = await botManager.startBot(meetLink, duration);
-        res.json(result);
+
+        res.status(200).json({
+            success: true,
+            ...result
+        });
     } catch (error) {
-        next(error);
+        console.error("[server] /api/bot/start error:", error);
+
+        if (error instanceof ServerError) {
+            res.status(error.statusCode || 500).json({
+                success: false,
+                message: error.message,
+            });
+        } else {
+            res.status(500).json({
+                success: false,
+                message: "Internal Server Error while starting bot",
+            });
+        }
     }
 });
+
 
 app.post("/api/bot/stop", async (req, res, next) => {
     try {
