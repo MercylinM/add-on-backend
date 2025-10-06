@@ -48,7 +48,7 @@ const CONFIG = {
 };
 
 const BOT_CONFIG = {
-    BOT_SERVICE_URL: process.env.BOT_SERVICE_URL || 'https://gmeet-bot.onrender.com',
+    BOT_SERVICE_URL: process.env.BOT_SERVICE_URL,
     DEFAULT_DURATION: 60
 };
 
@@ -784,23 +784,55 @@ class GeminiAnalyzer {
 
 class BotManager {
     constructor() {
-        this.status = 'idle'; 
+        this.status = 'idle';
         this.currentMeeting = null;
         this.startTime = null;
     }
 
     async triggerBotService(meetLink, duration) {
-        const botUrl = BOT_CONFIG.BOT_SERVICE_URL || 'https://gmeet-bot.onrender.com';
-        const response = await fetch(`${botUrl}/start`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ meet_link: meetLink, duration })
-        });
-        if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`Bot service start failed: ${errorText}`);
+        const botUrl = BOT_CONFIG.BOT_SERVICE_URL;
+        if (!botUrl) {
+            console.error('[bot-manager] BOT_SERVICE_URL is not configured');
+            throw new ServerError('Bot service URL is not configured', 500);
         }
-        return response.json();
+
+        console.log(`[bot-manager] Triggering bot service at: ${botUrl}`);
+        console.log(`[bot-manager] Request payload: ${JSON.stringify({ meet_link: meetLink, duration })}`);
+
+        try {
+            const response = await fetch(`${botUrl}/start`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Meet-Add-On-Server/1.0.0'
+                },
+                body: JSON.stringify({
+                    meet_link: meetLink,
+                    duration: duration
+                })
+            });
+
+            console.log(`[bot-manager] Response status: ${response.status}`);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`[bot-manager] Bot service error response: ${errorText}`);
+                throw new Error(`Bot service returned error ${response.status}: ${errorText}`);
+            }
+
+            const responseText = await response.text();
+            console.log(`[bot-manager] Bot service response: ${responseText}`);
+
+            try {
+                return JSON.parse(responseText);
+            } catch (parseError) {
+                console.error(`[bot-manager] Failed to parse response as JSON: ${parseError.message}`);
+                return { success: false, message: responseText };
+            }
+        } catch (error) {
+            console.error(`[bot-manager] Error triggering bot service: ${error.message}`);
+            throw error;
+        }
     }
 
     async startBot(meetLink, duration = BOT_CONFIG.DEFAULT_DURATION) {
@@ -820,6 +852,7 @@ class BotManager {
             this.startTime = Date.now();
 
             console.log(`[bot-manager] Bot status set to running`);
+            console.log(`[bot-manager] Bot response:`, botResponse);
 
             return {
                 ...botResponse,
@@ -843,14 +876,31 @@ class BotManager {
         try {
             console.log('[bot-manager] Stopping bot');
 
+            const botUrl = BOT_CONFIG.BOT_SERVICE_URL;
+            if (!botUrl) {
+                throw new ServerError('Bot service URL is not configured', 500);
+            }
+
+            const response = await fetch(`${botUrl}/stop`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'User-Agent': 'Meet-Add-On-Server/1.0.0'
+                }
+            });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error(`[bot-manager] Bot service error response: ${errorText}`);
+                throw new Error(`Bot service returned error ${response.status}: ${errorText}`);
+            }
+
             this.status = 'idle';
             this.currentMeeting = null;
             this.startTime = null;
 
-            return {
-                success: true,
-                message: 'Bot stopped successfully'
-            };
+            console.log("[server] Bot stopped successfully");
+            return { success: true, message: "Bot stopped successfully" };
 
         } catch (error) {
             console.error('[bot-manager] Failed to stop bot:', error);
