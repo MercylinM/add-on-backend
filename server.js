@@ -780,11 +780,27 @@ class GeminiAnalyzer {
     }
 }
 
+
+
 class BotManager {
     constructor() {
         this.status = 'idle'; 
         this.currentMeeting = null;
         this.startTime = null;
+    }
+
+    async triggerBotService(meetLink, duration) {
+        const botUrl = BOT_CONFIG.BOT_SERVICE_URL || 'https://gmeet-bot.onrender.com';
+        const response = await fetch(`${botUrl}/start`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ meet_link: meetLink, duration })
+        });
+        if (!response.ok) {
+            const errorText = await response.text();
+            throw new Error(`Bot service start failed: ${errorText}`);
+        }
+        return response.json();
     }
 
     async startBot(meetLink, duration = BOT_CONFIG.DEFAULT_DURATION) {
@@ -798,12 +814,7 @@ class BotManager {
 
             console.log(`[bot-manager] Starting bot for meeting: ${meetLink}`);
 
-            // The bot service is deployed on Render as a Background Worker
-            // It automatically starts when deployed, so we trigger it via environment variable update
-            // Or if you have a webhook/API on the bot service:
-
-            // For now, we'll just track status since the bot auto-joins
-            // You may need to implement a trigger mechanism based on your deployment
+            const botResponse = await this.triggerBotService(meetLink, duration);
 
             this.status = 'running';
             this.startTime = Date.now();
@@ -811,18 +822,16 @@ class BotManager {
             console.log(`[bot-manager] Bot status set to running`);
 
             return {
-                success: true,
-                status: 'running',
-                meetLink: this.currentMeeting,
-                message: 'Bot is joining the meeting'
+                ...botResponse,
+                status: 'running'
             };
-
         } catch (error) {
             console.error('[bot-manager] Failed to start bot:', error);
             this.status = 'error';
             throw new ServerError(`Failed to start bot: ${error.message}`, 500);
         }
     }
+
 
     async stopBot() {
         if (this.status === 'idle') {
