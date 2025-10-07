@@ -92,8 +92,6 @@ app.use(cors({
     preflightContinue: false
 }));
 
-app.options('*', cors());
-
 app.use((err, req, res, next) => {
     console.error('[server] Error:', err);
     res.status(err.statusCode || 500).json({
