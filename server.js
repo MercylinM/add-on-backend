@@ -42,7 +42,8 @@ const CONFIG = {
     CORS: {
         allowedOrigins: [
             'https://recos-meet-addon.vercel.app',
-            'http://localhost:3000'
+            'http://localhost:3000',
+            'https://gmeet-bot.onrender.com'
         ]
     }
 };
@@ -409,11 +410,11 @@ class SpeechProcessor {
             .on('end', () => this.handleStreamEnd());
 
         this.streamTimeout = setTimeout(() => {
-            // console.log('[speech-stream] Restarting due to time limit');
+            console.log('[speech-stream] Restarting due to time limit');
             this.restartStream();
         }, CONFIG.SPEECH.streamingLimit);
 
-        // console.log(`[speech-stream] Stream started (restart counter: ${this.restartCounter})`);
+        console.log(`[speech-stream] Stream started (restart counter: ${this.restartCounter})`);
     }
 
     resetStreamState() {
@@ -441,23 +442,23 @@ class SpeechProcessor {
     }
 
     handleStreamError(err) {
-        // console.error('[speech-stream] API error:', err);
+        console.error('[speech-stream] API error:', err);
         this.isStreamAlive = false;
 
         if (!this.pendingRestart) {
             this.pendingRestart = true;
             if (err.code === 11) { 
-                // console.log('[speech-stream] Restarting due to timeout');
+                console.log('[speech-stream] Restarting due to timeout');
                 this.restartStream();
             } else {
-                // console.error('[speech-stream] Non-timeout error:', err);
+                console.error('[speech-stream] Non-timeout error:', err);
                 setTimeout(() => this.restartStream(), 1000);
             }
         }
     }
 
     handleStreamEnd() {
-        // console.log('[speech-stream] Stream ended naturally');
+        console.log('[speech-stream] Stream ended naturally');
         this.isStreamAlive = false;
 
         if (!this.pendingRestart) {
@@ -470,7 +471,7 @@ class SpeechProcessor {
         if (this.pendingRestart) return;
 
         this.pendingRestart = true;
-        // console.log(`[speech-stream] Restarting stream (counter: ${this.restartCounter})`);
+        console.log(`[speech-stream] Restarting stream (counter: ${this.restartCounter})`);
 
         if (this.streamTimeout) {
             clearTimeout(this.streamTimeout);
@@ -521,7 +522,7 @@ class SpeechProcessor {
                 const mappedSpeaker = this.mapSpeakerLabel(`${speakerTag}`);
 
                 if (isFinal) {
-                    // console.log(`[speech-stream] ${correctedTime}: ${mappedSpeaker} - ${transcript}`);
+                    console.log(`[speech-stream] ${correctedTime}: ${mappedSpeaker} - ${transcript}`);
 
                     if (!this.speakerBuffer[mappedSpeaker]) {
                         this.speakerBuffer[mappedSpeaker] = '';
@@ -570,7 +571,7 @@ class SpeechProcessor {
                 }
             }
         } catch (error) {
-            // console.error('[speech-stream] Error processing speech callback:', error);
+            console.error('[speech-stream] Error processing speech callback:', error);
         }
     }
 
@@ -624,13 +625,13 @@ class SpeechProcessor {
 
                     next();
                 } catch (error) {
-                    // console.error('[speech-stream] Error writing to stream:', error);
+                    console.error('[speech-stream] Error writing to stream:', error);
                     next();
                 }
             },
 
             final() {
-                // console.log('[speech-stream] Audio stream ended');
+                console.log('[speech-stream] Audio stream ended');
             }
         });
     }
@@ -692,7 +693,7 @@ class GeminiAnalyzer {
             return this.parseResponse(raw);
         } catch (err) {
             this.errorCount++;
-            // console.error("[gemini] Analysis error:", err);
+            console.error("[gemini] Analysis error:", err);
             return this.getFallbackResponse();
         }
     }
@@ -725,8 +726,8 @@ class GeminiAnalyzer {
             };
 
         } catch (parseError) {
-            // console.error('[gemini] Failed to parse response:', parseError);
-            // console.error('[gemini] Raw response:', raw);
+            console.error('[gemini] Failed to parse response:', parseError);
+            console.error('[gemini] Raw response:', raw);
 
             return this.extractFallbackData(cleanedRaw, raw);
         }
@@ -779,8 +780,6 @@ class GeminiAnalyzer {
         };
     }
 }
-
-
 
 class BotManager {
     constructor() {
@@ -1036,7 +1035,6 @@ app.post("/api/session/start", async (req, res) => {
         const { meetingId, participants } = req.body;
         console.log(`[session] Starting session for meeting: ${meetingId}`);
 
-        // You can add session tracking logic here
 
         res.json({
             success: true,
@@ -1091,7 +1089,7 @@ transcriptWss.on("connection", (client, req) => {
 
 function broadcastToTranscriptClients(data) {
     transcriptWss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
+        if (client.readyState === 1) {
             try {
                 client.send(JSON.stringify(data));
             } catch (error) {
@@ -1117,7 +1115,7 @@ speechProcessor.on('transcript', (data) => {
     };
 
     wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
+        if (client.readyState === 1) {
             client.send(JSON.stringify(transcriptData));
         }
     });
@@ -1144,7 +1142,7 @@ speechProcessor.on('analysis', async (data) => {
         };
 
         wss.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
+            if (client.readyState === 1) {
                 client.send(JSON.stringify(enriched));
             }
         });
@@ -1159,7 +1157,7 @@ wss.on("connection", (client, req) => {
     const origin = req.headers.origin;
 
     if (origin && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
-        // console.log('[server] WebSocket connection rejected from origin:', origin);
+        console.log('[server] WebSocket connection rejected from origin:', origin);
         client.close(1008, 'Origin not allowed');
         return;
     }
@@ -1181,12 +1179,12 @@ wss.on("connection", (client, req) => {
                 audioStream.write(msg);
             }
         } catch (error) {
-            // console.error('[server] Error processing audio message:', error);
+            console.error('[server] Error processing audio message:', error);
         }
     });
 
     client.on("close", () => {
-        // console.log("[server] Bot WS closed");
+        console.log("[server] Bot WS closed");
         if (audioStream) {
             audioStream.end();
         }
@@ -1242,17 +1240,17 @@ const gracefulShutdown = async () => {
         });
 
         server.close(() => {
-            // console.log('[server] HTTP server closed');
+            console.log('[server] HTTP server closed');
             process.exit(0);
         });
 
         setTimeout(() => {
-            // console.log('[server] Force exit');
+            console.log('[server] Force exit');
             process.exit(1);
         }, 10000);
 
     } catch (error) {
-        // console.error('[server] Error during shutdown:', error);
+        console.error('[server] Error during shutdown:', error);
         process.exit(1);
     }
 };
