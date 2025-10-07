@@ -13,7 +13,7 @@ import { exec } from 'child_process';
 import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fetch from 'node-fetch';
+import fetch from "node-fetch";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,19 +25,20 @@ const CONFIG = {
         encoding: 'LINEAR16',
         sampleRateHertz: 16000,
         languageCode: 'en-US',
-        streamingLimit: 290000,
+        streamingLimit: 3900000, // 65 minutes - increased from 290000
         minSpeakerCount: 1,
         maxSpeakerCount: 6,
         enableWordTimeOffsets: true,
         enableAutomaticPunctuation: true,
         profanityFilter: false,
         useEnhanced: true,
-        model: 'latest_long'
+        model: 'latest_long',
+        inactivityTimeout: 60000 // 1 minute inactivity timeout
     },
     BUFFER: {
-        minSegmentLength: 50,    
-        maxSegmentLength: 300,   
-        silenceThresholdMs: 3000 
+        minSegmentLength: 50,
+        maxSegmentLength: 300,
+        silenceThresholdMs: 3000
     },
     CORS: {
         allowedOrigins: [
@@ -46,6 +47,10 @@ const CONFIG = {
             'https://gmeet-bot.onrender.com',
             'gmeet-bot.onrender.com'
         ]
+    },
+    HEARTBEAT: {
+        interval: 30000, // 30 seconds
+        timeout: 5000 // 5 seconds
     }
 };
 
@@ -109,11 +114,16 @@ app.use((req, res, next) => {
 app.use(bodyParser.json({ limit: '10mb' }));
 
 app.get('/health', (req, res) => {
+    const memUsage = process.memoryUsage();
+    const memUsagePercent = (memUsage.heapUsed / memUsage.heapTotal) * 100;
+
     res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
-        memory: process.memoryUsage()
+        memory: memUsage,
+        memoryUsagePercent: memUsagePercent.toFixed(2),
+        websocketConnections: wss.clients.size
     });
 });
 
@@ -449,13 +459,11 @@ class SpeechProcessor {
 
         if (!this.pendingRestart) {
             this.pendingRestart = true;
-            if (err.code === 11) { 
-                console.log('[speech-stream] Restarting due to timeout');
-                this.restartStream();
-            } else {
-                console.error('[speech-stream] Non-timeout error:', err);
-                setTimeout(() => this.restartStream(), 1000);
-            }
+            console.log(`[speech-stream] Error details: ${JSON.stringify(err)}`);
+
+            // Increase delay for restart to prevent rapid cycling
+            const delay = err.code === 11 ? 2000 : 5000;
+            setTimeout(() => this.restartStream(), delay);
         }
     }
 
@@ -499,7 +507,7 @@ class SpeechProcessor {
             this.startStream();
         }, delay);
     }
-   
+
     handleSpeechData(stream) {
         try {
             if (stream.results[0] && stream.results[0].resultEndTime) {
@@ -1015,7 +1023,6 @@ app.post("/api/bot/start", async (req, res, next) => {
     }
 });
 
-
 app.post("/api/bot/stop", async (req, res, next) => {
     try {
         const result = await botManager.stopBot();
@@ -1036,7 +1043,6 @@ app.post("/api/session/start", async (req, res) => {
     try {
         const { meetingId, participants } = req.body;
         console.log(`[session] Starting session for meeting: ${meetingId}`);
-
 
         res.json({
             success: true,
@@ -1068,17 +1074,53 @@ const server = http.createServer(app);
 const wss = new WebSocketServer({
     server,
     path: "/ws/audio",
-    perMessageDeflate: false,  
+    perMessageDeflate: false,
     verifyClient: (info) => {
         return true;
     },
     clientTracking: true,
-    maxPayload: 1024 * 1024, 
-}); 
+    maxPayload: 1024 * 1024,
+});
 const transcriptWss = new WebSocketServer({ server, path: "/ws/transcripts" });
 const speechProcessor = new SpeechProcessor();
 
 let lastAudioTime = 0;
+
+// Heartbeat to keep connections alive
+const heartbeatInterval = setInterval(() => {
+    wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            client.ping();
+        }
+    });
+}, CONFIG.HEARTBEAT.interval);
+
+// Clean up on server shutdown
+process.on('SIGINT', () => {
+    clearInterval(heartbeatInterval);
+    gracefulShutdown();
+});
+
+// Connection health monitoring
+function monitorConnectionHealth() {
+    setInterval(() => {
+        const now = Date.now();
+
+        // Check if we have clients but no recent audio
+        if (wss.clients.size > 0 && now - lastAudioTime > CONFIG.SPEECH.inactivityTimeout) {
+            console.log("[server] No audio received for inactivity timeout, checking connection health");
+
+            // Check if stream is still alive
+            if (speechProcessor && !speechProcessor.isStreamAlive) {
+                console.log("[server] Stream is not alive, restarting");
+                speechProcessor.startStream();
+            }
+        }
+
+        // Log connection status
+        console.log(`[server] Connection status: ${wss.clients.size} clients, last audio: ${now - lastAudioTime}ms ago`);
+    }, 60000); // Check every minute
+}
 
 transcriptWss.on("connection", (client, req) => {
     const origin = req.headers.origin;
@@ -1111,8 +1153,6 @@ function broadcastToTranscriptClients(data) {
         }
     });
 }
-
-
 
 speechProcessor.on('transcript', (data) => {
     const { transcript, speaker, speakerTag, isFinal, timestamp } = data;
@@ -1168,21 +1208,30 @@ speechProcessor.on('analysis', async (data) => {
 
 wss.on("connection", (client, req) => {
     const origin = req.headers.origin;
+    const clientId = Math.random().toString(36).substring(7);
 
     if (!origin) {
-        console.log("[server] Bot audio WS connected with no origin");
+        console.log(`[server] Bot audio WS connected [${clientId}] with no origin`);
     } else if (!CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
         console.log('[server] WebSocket connection rejected from origin:', origin);
         client.close(1008, 'Origin not allowed');
         return;
     } else {
-        console.log("[server] Bot audio WS connected from", origin);
+        console.log(`[server] Bot audio WS connected [${clientId}] from ${origin}`);
     }
 
     let isFirstConnection = wss.clients.size === 1;
     let audioStream = null;
 
     client.binaryType = 'arraybuffer';
+
+    // Handle pong responses
+    client.on('pong', () => {
+        client.isAlive = true;
+    });
+
+    // Mark client as alive initially
+    client.isAlive = true;
 
     audioStream = speechProcessor.createAudioStream();
 
@@ -1191,7 +1240,7 @@ wss.on("connection", (client, req) => {
     }
 
     client.on("message", (msg) => {
-        try{
+        try {
             let audioData;
             if (msg instanceof Buffer) {
                 audioData = msg;
@@ -1207,19 +1256,19 @@ wss.on("connection", (client, req) => {
                 lastAudioTime = Date.now();
             }
 
-        }catch (error) {
+        } catch (error) {
             console.error('[server] Error processing audio message:', error);
         }
     });
 
-
     client.on("close", (code, reason) => {
-        console.log(`[server] Bot WS closed with code ${code}, reason: ${reason}`);
+        console.log(`[server] Bot WS [${clientId}] closed with code ${code}, reason: ${reason}`);
 
         if (audioStream) {
             audioStream.end();
         }
 
+        // Only stop the stream if there are no more clients
         if (wss.clients.size === 0) {
             console.log("[server] No more clients, stopping stream");
             if (speechProcessor.streamTimeout) {
@@ -1236,41 +1285,12 @@ wss.on("connection", (client, req) => {
     });
 
     client.on("error", (error) => {
-        console.error("[server] WebSocket client error:", error);
+        console.error(`[server] WebSocket client [${clientId}] error:`, error);
     });
 });
 
-wss.on("close", (code, reason) => {
-    console.log(`[server] Bot WS closed with code ${code}, reason: ${reason}`);
-    
-    if (code !== 1000) {
-        return;
-    }
-    
-    if (code !== 1000 && code !== 1006) {
-        console.log("[server] Abnormal WebSocket closure detected, attempting to restart stream");
-        
-        if (speechProcessor && speechProcessor.isStreamAlive) {
-            speechProcessor.restartStream();
-        }
-    }
-});
-
-setInterval(() => {
-    const now = Date.now();
-    if (wss.clients.size > 0 && now - lastAudioTime > CONFIG.SPEECH.inactivityTimeout) {
-        console.log("[server] No audio received for inactivity timeout, restarting stream");
-        if (speechProcessor && speechProcessor.isStreamAlive) {
-            speechProcessor.restartStream();
-        }
-    }
-}, 10000);
-
-wss.on("message", (msg) => {
-    if (msg instanceof Buffer && msg.length > 0) {
-        lastAudioTime = Date.now();
-    }
-});
+// Monitor connection health
+monitorConnectionHealth();
 
 // =============== Server Startup ===============
 const startServer = async () => {
