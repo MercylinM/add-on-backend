@@ -87,7 +87,8 @@ app.use(cors({
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization'],
     credentials: true,
-    optionsSuccessStatus: 200
+    optionsSuccessStatus: 200,
+    preflightContinue: false
 }));
 
 app.use((err, req, res, next) => {
@@ -123,7 +124,7 @@ app.get('/', (req, res) => {
     });
 });
 
-// =============== Enhanced Participant Management ===============
+// ===============  Participant Management ===============
 class ParticipantManager {
     constructor() {
         this.participants = [];
