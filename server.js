@@ -43,7 +43,8 @@ const CONFIG = {
         allowedOrigins: [
             'https://recos-meet-addon.vercel.app',
             'http://localhost:3000',
-            'https://gmeet-bot.onrender.com'
+            'https://gmeet-bot.onrender.com',
+            'gmeet-bot.onrender.com'
         ]
     }
 };
@@ -90,6 +91,8 @@ app.use(cors({
     optionsSuccessStatus: 200,
     preflightContinue: false
 }));
+
+app.options('*', cors());
 
 app.use((err, req, res, next) => {
     console.error('[server] Error:', err);
@@ -1064,7 +1067,14 @@ app.post("/api/session/end", async (req, res) => {
 
 // =============== WebSocket Server ===============
 const server = http.createServer(app);
-const wss = new WebSocketServer({ server, path: "/ws/audio" });
+const wss = new WebSocketServer({
+    server,
+    path: "/ws/audio",
+    perMessageDeflate: false,  
+    verifyClient: (info) => {
+        return true;
+    }
+}); 
 const transcriptWss = new WebSocketServer({ server, path: "/ws/transcripts" });
 const speechProcessor = new SpeechProcessor();
 
@@ -1157,16 +1167,20 @@ speechProcessor.on('analysis', async (data) => {
 wss.on("connection", (client, req) => {
     const origin = req.headers.origin;
 
-    if (origin && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
+    if (!origin) {
+        console.log("[server] Bot audio WS connected with no origin");
+    } else if (!CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
         console.log('[server] WebSocket connection rejected from origin:', origin);
         client.close(1008, 'Origin not allowed');
         return;
+    } else {
+        console.log("[server] Bot audio WS connected from", origin);
     }
-
-    console.log("[server] Bot audio WS connected from", origin);
 
     let isFirstConnection = wss.clients.size === 1;
     let audioStream = null;
+
+    client.binaryType = 'arraybuffer';
 
     audioStream = speechProcessor.createAudioStream();
 
@@ -1176,16 +1190,26 @@ wss.on("connection", (client, req) => {
 
     client.on("message", (msg) => {
         try {
-            if (audioStream && msg instanceof Buffer) {
-                audioStream.write(msg);
+            let audioData;
+            if (msg instanceof Buffer) {
+                audioData = msg;
+            } else if (msg instanceof ArrayBuffer) {
+                audioData = Buffer.from(msg);
+            } else {
+                console.error('[server] Received non-binary message:', typeof msg);
+                return;
+            }
+
+            if (audioStream && audioData.length > 0) {
+                audioStream.write(audioData);
             }
         } catch (error) {
             console.error('[server] Error processing audio message:', error);
         }
     });
 
-    client.on("close", () => {
-        console.log("[server] Bot WS closed");
+    client.on("close", (code, reason) => {
+        console.log(`[server] Bot WS closed with code: ${code}, reason: ${reason}`);
         if (audioStream) {
             audioStream.end();
         }
