@@ -1071,10 +1071,14 @@ const wss = new WebSocketServer({
     perMessageDeflate: false,  
     verifyClient: (info) => {
         return true;
-    }
+    },
+    clientTracking: true,
+    maxPayload: 1024 * 1024, 
 }); 
 const transcriptWss = new WebSocketServer({ server, path: "/ws/transcripts" });
 const speechProcessor = new SpeechProcessor();
+
+let lastAudioTime = 0;
 
 transcriptWss.on("connection", (client, req) => {
     const origin = req.headers.origin;
@@ -1187,7 +1191,7 @@ wss.on("connection", (client, req) => {
     }
 
     client.on("message", (msg) => {
-        try {
+        try{
             let audioData;
             if (msg instanceof Buffer) {
                 audioData = msg;
@@ -1198,16 +1202,20 @@ wss.on("connection", (client, req) => {
                 return;
             }
 
-            if (audioStream && audioData.length > 0) {
+            if (audioData && audioData.length > 0) {
                 audioStream.write(audioData);
+                lastAudioTime = Date.now();
             }
-        } catch (error) {
+
+        }catch (error) {
             console.error('[server] Error processing audio message:', error);
         }
     });
 
+
     client.on("close", (code, reason) => {
-        console.log(`[server] Bot WS closed with code: ${code}, reason: ${reason}`);
+        console.log(`[server] Bot WS closed with code ${code}, reason: ${reason}`);
+
         if (audioStream) {
             audioStream.end();
         }
@@ -1230,6 +1238,38 @@ wss.on("connection", (client, req) => {
     client.on("error", (error) => {
         console.error("[server] WebSocket client error:", error);
     });
+});
+
+wss.on("close", (code, reason) => {
+    console.log(`[server] Bot WS closed with code ${code}, reason: ${reason}`);
+    
+    if (code !== 1000) {
+        return;
+    }
+    
+    if (code !== 1000 && code !== 1006) {
+        console.log("[server] Abnormal WebSocket closure detected, attempting to restart stream");
+        
+        if (speechProcessor && speechProcessor.isStreamAlive) {
+            speechProcessor.restartStream();
+        }
+    }
+});
+
+setInterval(() => {
+    const now = Date.now();
+    if (wss.clients.size > 0 && now - lastAudioTime > CONFIG.SPEECH.inactivityTimeout) {
+        console.log("[server] No audio received for inactivity timeout, restarting stream");
+        if (speechProcessor && speechProcessor.isStreamAlive) {
+            speechProcessor.restartStream();
+        }
+    }
+}, 10000);
+
+wss.on("message", (msg) => {
+    if (msg instanceof Buffer && msg.length > 0) {
+        lastAudioTime = Date.now();
+    }
 });
 
 // =============== Server Startup ===============
