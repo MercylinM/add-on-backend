@@ -1062,7 +1062,7 @@ speechProcessor.on('transcript', (data) => {
     };
 
     wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
+        if (client.readyState === 1) {
             client.send(JSON.stringify(transcriptData));
         }
     });
@@ -1086,7 +1086,7 @@ speechProcessor.on('analysis', async (data) => {
         };
 
         wss.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
+            if (client.readyState === 1) {
                 client.send(JSON.stringify(enriched));
             }
         });
