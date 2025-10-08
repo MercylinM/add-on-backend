@@ -3,7 +3,7 @@ dotenv.config();
 
 import express from "express";
 import bodyParser from "body-parser";
-import { WebSocketServer, WebSocket } from "ws";
+import { WebSocketServer } from "ws";
 import http from "http";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import speech from "@google-cloud/speech";
@@ -13,7 +13,6 @@ import { exec } from 'child_process';
 import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import fetch from "node-fetch";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,38 +24,28 @@ const CONFIG = {
         encoding: 'LINEAR16',
         sampleRateHertz: 16000,
         languageCode: 'en-US',
-        streamingLimit: 3900000, // 65 minutes - increased from 290000
+        streamingLimit: 290000,
         minSpeakerCount: 1,
         maxSpeakerCount: 6,
         enableWordTimeOffsets: true,
         enableAutomaticPunctuation: true,
         profanityFilter: false,
         useEnhanced: true,
-        model: 'latest_long',
-        inactivityTimeout: 60000 // 1 minute inactivity timeout
+        model: 'latest_long'
     },
     BUFFER: {
-        minSegmentLength: 50,
-        maxSegmentLength: 300,
-        silenceThresholdMs: 3000
+        minSegmentLength: 50,    
+        maxSegmentLength: 500,   
+        silenceThresholdMs: 3000 
     },
     CORS: {
         allowedOrigins: [
             'https://recos-meet-addon.vercel.app',
             'http://localhost:3000',
-            'https://gmeet-bot.onrender.com',
-            'gmeet-bot.onrender.com'
+            'http://localhost:10000',
+            'https://gmeet-bot.onrender.com'
         ]
-    },
-    HEARTBEAT: {
-        interval: 30000, // 30 seconds
-        timeout: 5000 // 5 seconds
     }
-};
-
-const BOT_CONFIG = {
-    BOT_SERVICE_URL: process.env.BOT_SERVICE_URL,
-    DEFAULT_DURATION: 60
 };
 
 // =============== Error Handling & Validation ===============
@@ -93,8 +82,7 @@ app.use(cors({
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Origin', 'X-Requested-With', 'Content-Type', 'Accept', 'Authorization'],
     credentials: true,
-    optionsSuccessStatus: 200,
-    preflightContinue: false
+    optionsSuccessStatus: 200
 }));
 
 app.use((err, req, res, next) => {
@@ -114,16 +102,11 @@ app.use((req, res, next) => {
 app.use(bodyParser.json({ limit: '10mb' }));
 
 app.get('/health', (req, res) => {
-    const memUsage = process.memoryUsage();
-    const memUsagePercent = (memUsage.heapUsed / memUsage.heapTotal) * 100;
-
     res.json({
         status: 'healthy',
         timestamp: new Date().toISOString(),
         uptime: process.uptime(),
-        memory: memUsage,
-        memoryUsagePercent: memUsagePercent.toFixed(2),
-        websocketConnections: wss.clients.size
+        memory: process.memoryUsage()
     });
 });
 
@@ -131,11 +114,219 @@ app.get('/', (req, res) => {
     res.json({
         message: 'Meet Add-on Server',
         version: '1.0.0',
-        endpoints: ['/health', '/participant-map', '/api/sox/*']
+        endpoints: [
+            '/health',
+            '/participant-map',
+            '/api/sox/*',
+            '/api/bot/*',
+            '/api/analytics'
+        ],
+        services: {
+            speech: 'Active',
+            gemini: 'Active',
+            bot: 'Available',
+            sox: 'Available'
+        }
     });
 });
 
-// ===============  Participant Management ===============
+// =============== Bot Management ===============
+class BotManager {
+    constructor() {
+        this.botUrl = process.env.BOT_SERVICE_URL || 'http://localhost:10000';
+        this.currentSession = null;
+        this.status = 'idle';
+    }
+
+    async startBot(meetLink, duration = 60) {
+        try {
+            console.log(`[bot-manager] Starting bot for meeting: ${meetLink}`);
+
+            const response = await fetch(`${this.botUrl}/start`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({
+                    meet_link: meetLink,
+                    duration: duration
+                })
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.currentSession = {
+                    meetLink: meetLink,
+                    startTime: new Date().toISOString(),
+                    duration: duration,
+                    status: 'starting'
+                };
+                this.status = 'starting';
+
+                console.log(`[bot-manager] Bot started successfully: ${meetLink}`);
+                return { success: true, ...result };
+            } else {
+                throw new ServerError(result.error || 'Failed to start bot', 500);
+            }
+
+        } catch (error) {
+            console.error('[bot-manager] Error starting bot:', error);
+            throw new ServerError(`Failed to start bot: ${error.message}`, 500);
+        }
+    }
+
+    async stopBot() {
+        try {
+            console.log('[bot-manager] Stopping bot...');
+
+            const response = await fetch(`${this.botUrl}/stop`, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                }
+            });
+
+            const result = await response.json();
+
+            if (result.success) {
+                this.currentSession = null;
+                this.status = 'idle';
+                console.log('[bot-manager] Bot stopped successfully');
+                return { success: true, ...result };
+            } else {
+                throw new ServerError(result.error || 'Failed to stop bot', 500);
+            }
+
+        } catch (error) {
+            console.error('[bot-manager] Error stopping bot:', error);
+            throw new ServerError(`Failed to stop bot: ${error.message}`, 500);
+        }
+    }
+
+    async getBotStatus() {
+        try {
+            const response = await fetch(`${this.botUrl}/status`);
+            const result = await response.json();
+
+            if (result.success) {
+                this.status = result.status;
+                if (result.isRunning && this.currentSession) {
+                    this.currentSession.status = 'running';
+                }
+                return { success: true, ...result };
+            } else {
+                throw new ServerError(result.error || 'Failed to get bot status', 500);
+            }
+
+        } catch (error) {
+            console.error('[bot-manager] Error getting bot status:', error);
+            throw new ServerError(`Failed to get bot status: ${error.message}`, 500);
+        }
+    }
+
+    async getBotHealth() {
+        try {
+            const response = await fetch(`${this.botUrl}/health`);
+            return await response.json();
+        } catch (error) {
+            console.error('[bot-manager] Error getting bot health:', error);
+            throw new ServerError(`Bot server is unreachable: ${error.message}`, 503);
+        }
+    }
+
+    getCurrentSession() {
+        return this.currentSession;
+    }
+
+    getStatus() {
+        return {
+            status: this.status,
+            currentSession: this.currentSession,
+            botUrl: this.botUrl
+        };
+    }
+}
+
+const botManager = new BotManager();
+
+// =============== Bot Management API Routes ===============
+
+app.post("/api/bot/start", async (req, res, next) => {
+    try {
+        const { meet_link, duration = 60 } = req.body;
+
+        if (!meet_link) {
+            throw new ServerError('Meeting link is required', 400);
+        }
+
+        if (!meet_link.includes('meet.google.com')) {
+            throw new ServerError('Invalid Google Meet link', 400);
+        }
+
+        const result = await botManager.startBot(meet_link, duration);
+        res.json(result);
+
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.post("/api/bot/stop", async (req, res, next) => {
+    try {
+        const result = await botManager.stopBot();
+        res.json(result);
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.get("/api/bot/status", async (req, res, next) => {
+    try {
+        const result = await botManager.getBotStatus();
+        res.json(result);
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.get("/api/bot/health", async (req, res, next) => {
+    try {
+        const result = await botManager.getBotHealth();
+        res.json(result);
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.get("/api/analytics", async (req, res) => {
+    try {
+        const botStatus = await botManager.getBotStatus().catch(() => ({
+            success: false,
+            status: 'unreachable'
+        }));
+
+        res.json({
+            success: true,
+            gemini: geminiAnalyzer.getStats(),
+            participants: participantManager.getAll(),
+            sox: audioDeviceManager.getStatus(),
+            bot: botStatus.success ? botStatus : { status: 'unreachable' },
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.json({
+            success: true,
+            gemini: geminiAnalyzer.getStats(),
+            participants: participantManager.getAll(),
+            sox: audioDeviceManager.getStatus(),
+            bot: { status: 'error', error: error.message },
+            timestamp: new Date().toISOString()
+        });
+    }
+});
+
+// =============== Enhanced Participant Management ===============
 class ParticipantManager {
     constructor() {
         this.participants = [];
@@ -459,11 +650,13 @@ class SpeechProcessor {
 
         if (!this.pendingRestart) {
             this.pendingRestart = true;
-            console.log(`[speech-stream] Error details: ${JSON.stringify(err)}`);
-
-            // Increase delay for restart to prevent rapid cycling
-            const delay = err.code === 11 ? 2000 : 5000;
-            setTimeout(() => this.restartStream(), delay);
+            if (err.code === 11) { 
+                console.log('[speech-stream] Restarting due to timeout');
+                this.restartStream();
+            } else {
+                console.error('[speech-stream] Non-timeout error:', err);
+                setTimeout(() => this.restartStream(), 1000);
+            }
         }
     }
 
@@ -507,7 +700,7 @@ class SpeechProcessor {
             this.startStream();
         }, delay);
     }
-
+   
     handleSpeechData(stream) {
         try {
             if (stream.results[0] && stream.results[0].resultEndTime) {
@@ -791,144 +984,6 @@ class GeminiAnalyzer {
     }
 }
 
-class BotManager {
-    constructor() {
-        this.status = 'idle';
-        this.currentMeeting = null;
-        this.startTime = null;
-    }
-
-    async triggerBotService(meetLink, duration) {
-        const botUrl = BOT_CONFIG.BOT_SERVICE_URL;
-        if (!botUrl) {
-            console.error('[bot-manager] BOT_SERVICE_URL is not configured');
-            throw new ServerError('Bot service URL is not configured', 500);
-        }
-
-        console.log(`[bot-manager] Triggering bot service at: ${botUrl}`);
-        console.log(`[bot-manager] Request payload: ${JSON.stringify({ meet_link: meetLink, duration })}`);
-
-        try {
-            const response = await fetch(`${botUrl}/start`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'Meet-Add-On-Server/1.0.0'
-                },
-                body: JSON.stringify({
-                    meet_link: meetLink,
-                    duration: duration
-                })
-            });
-
-            console.log(`[bot-manager] Response status: ${response.status}`);
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error(`[bot-manager] Bot service error response: ${errorText}`);
-                throw new Error(`Bot service returned error ${response.status}: ${errorText}`);
-            }
-
-            const responseText = await response.text();
-            console.log(`[bot-manager] Bot service response: ${responseText}`);
-
-            try {
-                return JSON.parse(responseText);
-            } catch (parseError) {
-                console.error(`[bot-manager] Failed to parse response as JSON: ${parseError.message}`);
-                return { success: false, message: responseText };
-            }
-        } catch (error) {
-            console.error(`[bot-manager] Error triggering bot service: ${error.message}`);
-            throw error;
-        }
-    }
-
-    async startBot(meetLink, duration = BOT_CONFIG.DEFAULT_DURATION) {
-        if (this.status === 'running' || this.status === 'starting') {
-            throw new ServerError('Bot is already running', 400);
-        }
-
-        try {
-            this.status = 'starting';
-            this.currentMeeting = meetLink;
-
-            console.log(`[bot-manager] Starting bot for meeting: ${meetLink}`);
-
-            const botResponse = await this.triggerBotService(meetLink, duration);
-
-            this.status = 'running';
-            this.startTime = Date.now();
-
-            console.log(`[bot-manager] Bot status set to running`);
-            console.log(`[bot-manager] Bot response:`, botResponse);
-
-            return {
-                ...botResponse,
-                status: 'running'
-            };
-        } catch (error) {
-            console.error('[bot-manager] Failed to start bot:', error);
-            this.status = 'error';
-            throw new ServerError(`Failed to start bot: ${error.message}`, 500);
-        }
-    }
-
-    async stopBot() {
-        if (this.status === 'idle') {
-            return {
-                success: true,
-                message: 'Bot is not running'
-            };
-        }
-
-        try {
-            console.log('[bot-manager] Stopping bot');
-
-            const botUrl = BOT_CONFIG.BOT_SERVICE_URL;
-            if (!botUrl) {
-                throw new ServerError('Bot service URL is not configured', 500);
-            }
-
-            const response = await fetch(`${botUrl}/stop`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'User-Agent': 'Meet-Add-On-Server/1.0.0'
-                }
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error(`[bot-manager] Bot service error response: ${errorText}`);
-                throw new Error(`Bot service returned error ${response.status}: ${errorText}`);
-            }
-
-            this.status = 'idle';
-            this.currentMeeting = null;
-            this.startTime = null;
-
-            console.log("[server] Bot stopped successfully");
-            return { success: true, message: "Bot stopped successfully" };
-
-        } catch (error) {
-            console.error('[bot-manager] Failed to stop bot:', error);
-            throw new ServerError(`Failed to stop bot: ${error.message}`, 500);
-        }
-    }
-
-    getStatus() {
-        return {
-            status: this.status,
-            isRunning: this.status === 'running',
-            currentMeeting: this.currentMeeting,
-            uptime: this.startTime ? Math.floor((Date.now() - this.startTime) / 1000) : 0
-        };
-    }
-}
-
-const botManager = new BotManager();
-
 // =============== API Routes ===============
 app.post("/participant-map", (req, res, next) => {
     try {
@@ -983,176 +1038,15 @@ app.get("/api/analytics", (req, res) => {
         success: true,
         gemini: geminiAnalyzer.getStats(),
         participants: participantManager.getAll(),
-        sox: audioDeviceManager.getStatus(),
-        bot: botManager.getStatus(),
-        connections: {
-            audioClients: wss.clients.size,
-            transcriptClients: transcriptWss.clients.size
-        }
+        sox: audioDeviceManager.getStatus()
     });
-});
-
-app.post("/api/bot/start", async (req, res, next) => {
-    try {
-        const { meetLink, duration = BOT_CONFIG.DEFAULT_DURATION } = req.body;
-
-        if (!meetLink) {
-            return res.status(400).json({ success: false, message: "Meeting link is required" });
-        }
-
-        const result = await botManager.startBot(meetLink, duration);
-
-        res.status(200).json({
-            success: true,
-            ...result
-        });
-    } catch (error) {
-        console.error("[server] /api/bot/start error:", error);
-
-        if (error instanceof ServerError) {
-            res.status(error.statusCode || 500).json({
-                success: false,
-                message: error.message,
-            });
-        } else {
-            res.status(500).json({
-                success: false,
-                message: "Internal Server Error while starting bot",
-            });
-        }
-    }
-});
-
-app.post("/api/bot/stop", async (req, res, next) => {
-    try {
-        const result = await botManager.stopBot();
-        res.json(result);
-    } catch (error) {
-        next(error);
-    }
-});
-
-app.get("/api/bot/status", (req, res) => {
-    res.json({
-        success: true,
-        ...botManager.getStatus()
-    });
-});
-
-app.post("/api/session/start", async (req, res) => {
-    try {
-        const { meetingId, participants } = req.body;
-        console.log(`[session] Starting session for meeting: ${meetingId}`);
-
-        res.json({
-            success: true,
-            message: 'Session started'
-        });
-    } catch (error) {
-        console.error('[session] Error starting session:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-app.post("/api/session/end", async (req, res) => {
-    try {
-        const { meetingId } = req.body;
-        console.log(`[session] Ending session for meeting: ${meetingId}`);
-
-        res.json({
-            success: true,
-            message: 'Session ended'
-        });
-    } catch (error) {
-        console.error('[session] Error ending session:', error);
-        res.status(500).json({ error: error.message });
-    }
 });
 
 // =============== WebSocket Server ===============
 const server = http.createServer(app);
-const wss = new WebSocketServer({
-    server,
-    path: "/ws/audio",
-    perMessageDeflate: false,
-    verifyClient: (info) => {
-        return true;
-    },
-    clientTracking: true,
-    maxPayload: 1024 * 1024,
-});
-const transcriptWss = new WebSocketServer({ server, path: "/ws/transcripts" });
+const wss = new WebSocketServer({ server, path: "/ws/audio" });
+
 const speechProcessor = new SpeechProcessor();
-
-let lastAudioTime = 0;
-
-// Heartbeat to keep connections alive
-const heartbeatInterval = setInterval(() => {
-    wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-            client.ping();
-        }
-    });
-}, CONFIG.HEARTBEAT.interval);
-
-// Clean up on server shutdown
-process.on('SIGINT', () => {
-    clearInterval(heartbeatInterval);
-    gracefulShutdown();
-});
-
-// Connection health monitoring
-function monitorConnectionHealth() {
-    setInterval(() => {
-        const now = Date.now();
-
-        // Check if we have clients but no recent audio
-        if (wss.clients.size > 0 && now - lastAudioTime > CONFIG.SPEECH.inactivityTimeout) {
-            console.log("[server] No audio received for inactivity timeout, checking connection health");
-
-            // Check if stream is still alive
-            if (speechProcessor && !speechProcessor.isStreamAlive) {
-                console.log("[server] Stream is not alive, restarting");
-                speechProcessor.startStream();
-            }
-        }
-
-        // Log connection status
-        console.log(`[server] Connection status: ${wss.clients.size} clients, last audio: ${now - lastAudioTime}ms ago`);
-    }, 60000); // Check every minute
-}
-
-transcriptWss.on("connection", (client, req) => {
-    const origin = req.headers.origin;
-
-    if (origin && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
-        console.log('[server] Transcript WS connection rejected from origin:', origin);
-        client.close(1008, 'Origin not allowed');
-        return;
-    }
-
-    console.log("[server] Add-on transcript WS connected from", origin);
-
-    client.on("error", (error) => {
-        console.error("[server] Transcript WebSocket client error:", error);
-    });
-
-    client.on("close", () => {
-        console.log("[server] Add-on transcript WS closed");
-    });
-});
-
-function broadcastToTranscriptClients(data) {
-    transcriptWss.clients.forEach(client => {
-        if (client.readyState === 1) {
-            try {
-                client.send(JSON.stringify(data));
-            } catch (error) {
-                console.error('[server] Error sending to transcript client:', error);
-            }
-        }
-    });
-}
 
 speechProcessor.on('transcript', (data) => {
     const { transcript, speaker, speakerTag, isFinal, timestamp } = data;
@@ -1168,12 +1062,10 @@ speechProcessor.on('transcript', (data) => {
     };
 
     wss.clients.forEach(client => {
-        if (client.readyState === 1) {
+        if (client.readyState === WebSocket.OPEN) {
             client.send(JSON.stringify(transcriptData));
         }
     });
-
-    broadcastToTranscriptClients(transcriptData);
 });
 
 speechProcessor.on('analysis', async (data) => {
@@ -1190,17 +1082,14 @@ speechProcessor.on('analysis', async (data) => {
             message_type: "enriched_transcript",
             end_of_turn: true,
             timestamp: timestamp,
-            is_final: true,
-            analysis_timestamp: Date.now()
+            is_final: true
         };
 
         wss.clients.forEach(client => {
-            if (client.readyState === 1) {
+            if (client.readyState === WebSocket.OPEN) {
                 client.send(JSON.stringify(enriched));
             }
         });
-
-        broadcastToTranscriptClients(enriched);
     } catch (error) {
         console.error('[server] Error in Gemini analysis:', error);
     }
@@ -1208,30 +1097,17 @@ speechProcessor.on('analysis', async (data) => {
 
 wss.on("connection", (client, req) => {
     const origin = req.headers.origin;
-    const clientId = Math.random().toString(36).substring(7);
 
-    if (!origin) {
-        console.log(`[server] Bot audio WS connected [${clientId}] with no origin`);
-    } else if (!CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
+    if (origin && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
         console.log('[server] WebSocket connection rejected from origin:', origin);
         client.close(1008, 'Origin not allowed');
         return;
-    } else {
-        console.log(`[server] Bot audio WS connected [${clientId}] from ${origin}`);
     }
+
+    console.log("[server] Bot audio WS connected from", origin);
 
     let isFirstConnection = wss.clients.size === 1;
     let audioStream = null;
-
-    client.binaryType = 'arraybuffer';
-
-    // Handle pong responses
-    client.on('pong', () => {
-        client.isAlive = true;
-    });
-
-    // Mark client as alive initially
-    client.isAlive = true;
 
     audioStream = speechProcessor.createAudioStream();
 
@@ -1241,34 +1117,20 @@ wss.on("connection", (client, req) => {
 
     client.on("message", (msg) => {
         try {
-            let audioData;
-            if (msg instanceof Buffer) {
-                audioData = msg;
-            } else if (msg instanceof ArrayBuffer) {
-                audioData = Buffer.from(msg);
-            } else {
-                console.error('[server] Received non-binary message:', typeof msg);
-                return;
+            if (audioStream && msg instanceof Buffer) {
+                audioStream.write(msg);
             }
-
-            if (audioData && audioData.length > 0) {
-                audioStream.write(audioData);
-                lastAudioTime = Date.now();
-            }
-
         } catch (error) {
             console.error('[server] Error processing audio message:', error);
         }
     });
 
-    client.on("close", (code, reason) => {
-        console.log(`[server] Bot WS [${clientId}] closed with code ${code}, reason: ${reason}`);
-
+    client.on("close", () => {
+        console.log("[server] Bot WS closed");
         if (audioStream) {
             audioStream.end();
         }
 
-        // Only stop the stream if there are no more clients
         if (wss.clients.size === 0) {
             console.log("[server] No more clients, stopping stream");
             if (speechProcessor.streamTimeout) {
@@ -1285,12 +1147,9 @@ wss.on("connection", (client, req) => {
     });
 
     client.on("error", (error) => {
-        console.error(`[server] WebSocket client [${clientId}] error:`, error);
+        console.error("[server] WebSocket client error:", error);
     });
 });
-
-// Monitor connection health
-monitorConnectionHealth();
 
 // =============== Server Startup ===============
 const startServer = async () => {
@@ -1311,7 +1170,7 @@ const startServer = async () => {
 
 // =============== Graceful Shutdown ===============
 const gracefulShutdown = async () => {
-    console.log('\n[server] Shutting down...');
+    console.log('\n[server] Shutting down gracefully...');
 
     try {
         if (audioDeviceManager.getStatus().running) {
@@ -1341,4 +1200,5 @@ const gracefulShutdown = async () => {
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
+// Start the server
 startServer();
