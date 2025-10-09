@@ -13,6 +13,8 @@ import { exec } from 'child_process';
 import { spawn } from 'child_process';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import fetch from 'node-fetch';
+globalThis.fetch = fetch;
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -36,7 +38,7 @@ const CONFIG = {
     BUFFER: {
         minSegmentLength: 50,    
         maxSegmentLength: 500,   
-        silenceThresholdMs: 3000 
+        silenceThresholdMs: 2000 
     },
     CORS: {
         allowedOrigins: [
@@ -148,10 +150,23 @@ class BotManager {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    meet_link: meetLink,
+                    meet_link: meetLink,  
                     duration: duration
                 })
             });
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('[bot-manager] Bot service returned error:', response.status, errorText);
+                throw new Error(`Bot service returned ${response.status}: ${errorText}`);
+            }
+
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const responseText = await response.text();
+                console.error('[bot-manager] Expected JSON but got:', contentType, responseText.substring(0, 200));
+                throw new Error(`Bot service returned non-JSON response: ${contentType}`);
+            }
 
             const result = await response.json();
 
@@ -187,6 +202,19 @@ class BotManager {
                 }
             });
 
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('[bot-manager] Bot service returned error:', response.status, errorText);
+                throw new Error(`Bot service returned ${response.status}: ${errorText}`);
+            }
+
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const responseText = await response.text();
+                console.error('[bot-manager] Expected JSON but got:', contentType, responseText.substring(0, 200));
+                throw new Error(`Bot service returned non-JSON response: ${contentType}`);
+            }
+
             const result = await response.json();
 
             if (result.success) {
@@ -207,6 +235,20 @@ class BotManager {
     async getBotStatus() {
         try {
             const response = await fetch(`${this.botUrl}/status`);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('[bot-manager] Bot service returned error:', response.status, errorText);
+                throw new Error(`Bot service returned ${response.status}: ${errorText}`);
+            }
+
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const responseText = await response.text();
+                console.error('[bot-manager] Expected JSON but got:', contentType, responseText.substring(0, 200));
+                throw new Error(`Bot service returned non-JSON response: ${contentType}`);
+            }
+
             const result = await response.json();
 
             if (result.success) {
@@ -228,6 +270,20 @@ class BotManager {
     async getBotHealth() {
         try {
             const response = await fetch(`${this.botUrl}/health`);
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                console.error('[bot-manager] Bot service returned error:', response.status, errorText);
+                throw new Error(`Bot service returned ${response.status}: ${errorText}`);
+            }
+
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const responseText = await response.text();
+                console.error('[bot-manager] Expected JSON but got:', contentType, responseText.substring(0, 200));
+                throw new Error(`Bot service returned non-JSON response: ${contentType}`);
+            }
+
             return await response.json();
         } catch (error) {
             console.error('[bot-manager] Error getting bot health:', error);
@@ -376,7 +432,7 @@ class ParticipantManager {
 
 const participantManager = new ParticipantManager();
 
-// =============== Enhanced Audio Device Management ===============
+// ===============  Audio Device Management ===============
 class AudioDeviceManager {
     constructor() {
         this.soxProcess = null;
@@ -517,7 +573,7 @@ class AudioDeviceManager {
                     process.kill(this.status.pid, 'SIGKILL');
                 }
             }, 5000);
-
+ 
             this.resetStatus();
             this.soxProcess = null;
 
@@ -546,7 +602,7 @@ class AudioDeviceManager {
 
 const audioDeviceManager = new AudioDeviceManager();
 
-// =============== Enhanced Speech Processing ===============
+// ===============  Speech Processing ===============
 class SpeechProcessor {
     constructor() {
         this.credentials = this.loadCredentials();
@@ -859,46 +915,132 @@ Object.assign(SpeechProcessor.prototype, {
 class GeminiAnalyzer {
     constructor() {
         this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-        this.model = this.genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+        this.model = this.genAI.getGenerativeModel({
+            model: "gemini-2.5-flash", 
+            generationConfig: {
+                temperature: 0.3, 
+                topK: 40,
+                topP: 0.95,
+                maxOutputTokens: 2048,
+            }
+        });
+
         this.requestCount = 0;
         this.errorCount = 0;
+        this.currentModel = "gemini-2.5-flash";
     }
 
     async analyze(speaker, text) {
+        if (!text || text.trim().length < 20 || this.isNoise(text)) {
+            console.log('[gemini] Skipping analysis - text too short or noise:', text.substring(0, 50));
+            return this.getFallbackResponse();
+        }
+
         this.requestCount++;
 
         const prompt = `
-            You are assisting in a recruiter interview.
+            You are an AI assistant analyzing interview conversations. Analyze the following transcript and provide insights.
+
             Speaker: ${speaker}
             Transcript: "${text}"
 
-            Tasks:
-            1. Summarize the intent of what the speaker said in one sentence.
-            2. Extract semantic meaning (skills, experience, attitude).
-            3. Suggest 1-2 recruiter follow-up questions based on this.
-            
-            Return ONLY valid JSON with fields: 
-            { 
-                "summary": "...", 
-                "semantics": "...", 
-                "questions": ["...", "..."],
+            Please provide a JSON response with the following structure:
+            {
+                "summary": "Brief one-sentence summary of what was said",
+                "semantics": "Key semantic meaning, skills, experience, or attitudes mentioned",
+                "questions": ["Question 1 for follow-up", "Question 2 for follow-up"],
                 "confidence": 0.95,
-                "keywords": ["skill1", "skill2"]
-            }.
-            
-            Do not include any markdown formatting or code blocks.
+                "keywords": ["keyword1", "keyword2", "keyword3"]
+            }
+
+            Important: Return ONLY valid JSON, no additional text or markdown.
         `;
 
         try {
-            const resp = await this.model.generateContent(prompt);
-            const raw = resp.response.text();
+            console.log(`[gemini] Analyzing transcript (${text.length} chars): ${text}`);
 
-            return this.parseResponse(raw);
+            const result = await this.model.generateContent(prompt);
+            const response = result.response;
+            const analysisText = response.text();
+
+            console.log('[gemini] Raw response received, length:', analysisText.length);
+            console.log('[gemini] Raw response preview:', analysisText);
+
+            const parsedResult = this.parseResponse(analysisText);
+            console.log('[gemini] Parsed result:', JSON.stringify(parsedResult, null, 2));
+
+            return parsedResult;
+
         } catch (err) {
             this.errorCount++;
-            console.error("[gemini] Analysis error:", err);
+            console.error("[gemini] Analysis error:", err.message);
+
+            if (err.status === 404 || err.message.includes('not found')) {
+                console.log('[gemini] Model not found, trying fallback model...');
+                return await this.tryFallbackModel(speaker, text);
+            }
+
             return this.getFallbackResponse();
         }
+    }
+
+    async tryFallbackModel(speaker, text) {
+        try {
+            console.log('[gemini] Trying fallback model: gemini-2.0-flash-001');
+            const fallbackModel = this.genAI.getGenerativeModel({
+                model: "gemini-2.0-flash-001",
+                generationConfig: {
+                    temperature: 0.3,
+                    topK: 40,
+                    topP: 0.95,
+                    maxOutputTokens: 2048,
+                }
+            });
+
+            const prompt = `
+                You are an AI assistant analyzing interview conversations. Analyze the following transcript and provide insights.
+
+                Speaker: ${speaker}
+                Transcript: "${text}"
+
+                Please provide a JSON response with:
+                {
+                    "summary": "Brief summary",
+                    "semantics": "Key meaning",
+                    "questions": ["Question 1", "Question 2"],
+                    "confidence": 0.9,
+                    "keywords": ["kw1", "kw2"]
+                }
+
+                Return ONLY valid JSON.
+            `;
+
+            const result = await fallbackModel.generateContent(prompt);
+            const response = result.response;
+            const analysisText = response.text();
+
+            this.currentModel = "gemini-2.0-flash-001";
+            return this.parseResponse(analysisText);
+
+        } catch (fallbackError) {
+            console.error('[gemini] Fallback model also failed:', fallbackError.message);
+            return this.getFallbackResponse();
+        }
+    }
+
+    isNoise(text) {
+        const cleanText = text.trim().toLowerCase();
+        const noisePatterns = [
+            /^\s*(okay|yes|no|uh|um|ah|eh|oh|hm|hmm|mmm)\s*[.!?]*\s*$/,
+            /^\s*(hello|hi|hey)\s*[.!?]*\s*$/,
+            /^\s*(thank you|thanks)\s*[.!?]*\s*$/,
+            /^\s*[.,!?;:\s]*$/,
+            /^\s*(yeah|yep|nope|maybe|probably|possibly)\s*[.!?]*\s*$/,
+            /^\s*(ok|k|alright|right|sure)\s*[.!?]*\s*$/,
+            /^\s*[0-9\s]*$/
+        ];
+
+        return noisePatterns.some(pattern => pattern.test(cleanText)) || cleanText.split(' ').length < 3;
     }
 
     parseResponse(raw) {
@@ -912,48 +1054,54 @@ class GeminiAnalyzer {
             cleanedRaw = cleanedRaw.replace(/\n?```$/, '');
         }
 
+        const jsonMatch = cleanedRaw.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            cleanedRaw = jsonMatch[0];
+        }
+
         try {
             const parsed = JSON.parse(cleanedRaw);
 
-            const required = ['summary', 'semantics', 'questions'];
-            const missing = required.filter(field => !parsed[field]);
-
-            if (missing.length > 0) {
-                throw new Error(`Missing required fields: ${missing.join(', ')}`);
-            }
-
             return {
-                ...parsed,
-                confidence: parsed.confidence || 0.8,
-                keywords: parsed.keywords || []
+                summary: parsed.summary || "No summary available",
+                semantics: parsed.semantics || "No semantic analysis available",
+                questions: Array.isArray(parsed.questions) ? parsed.questions : ["Could you tell me more about that?"],
+                confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.8,
+                keywords: Array.isArray(parsed.keywords) ? parsed.keywords : []
             };
 
         } catch (parseError) {
-            console.error('[gemini] Failed to parse response:', parseError);
-            console.error('[gemini] Raw response:', raw);
+            console.error('[gemini] Failed to parse response as JSON:', parseError.message);
+            console.error('[gemini] Raw response that failed:', raw.substring(0, 200));
 
-            return this.extractFallbackData(cleanedRaw, raw);
+            return this.extractFallbackData(cleanedRaw);
         }
     }
 
-    extractFallbackData(cleanedRaw, raw) {
-        const summaryMatch = cleanedRaw.match(/"summary"\s*:\s*"([^"]*)"/);
-        const semanticsMatch = cleanedRaw.match(/"semantics"\s*:\s*"([^"]*)"/);
-        const questionsMatch = cleanedRaw.match(/"questions"\s*:\s*\[([^\]]*)\]/);
+    extractFallbackData(cleanedRaw) {
+        const lines = cleanedRaw.split('\n').filter(line => line.trim().length > 0);
 
-        const summary = summaryMatch ? summaryMatch[1] : raw.substring(0, 200);
-        const semantics = semanticsMatch ? semanticsMatch[1] : "";
-        let questions = [];
+        let summary = "Analysis completed but format issue";
+        let semantics = "";
+        let questions = ["Could you elaborate on that?"];
 
-        if (questionsMatch) {
-            try {
-                questions = JSON.parse(`[${questionsMatch[1]}]`);
-            } catch (e) {
-                const questionMatches = questionsMatch[1].match(/"([^"]*)"/g);
-                if (questionMatches) {
-                    questions = questionMatches.map(match => match.replace(/^"|"$/g, ''));
-                }
+        if (lines.length > 0) {
+            const firstLine = lines[0].replace(/["{}]/g, '').trim();
+            if (firstLine.length > 10 && !firstLine.includes('{') && !firstLine.includes('}')) {
+                summary = firstLine.substring(0, 150);
             }
+        }
+
+        const questionLines = lines.filter(line =>
+            line.includes('?') ||
+            line.toLowerCase().includes('what') ||
+            line.toLowerCase().includes('how') ||
+            line.toLowerCase().includes('could you') ||
+            line.toLowerCase().includes('can you')
+        );
+
+        if (questionLines.length > 0) {
+            questions = questionLines.slice(0, 2).map(q => q.replace(/["{}]/g, '').trim());
         }
 
         return {
@@ -967,7 +1115,7 @@ class GeminiAnalyzer {
 
     getFallbackResponse() {
         return {
-            summary: "Analysis unavailable",
+            summary: "Analysis unavailable - processing error",
             semantics: "",
             questions: [],
             confidence: 0.0,
@@ -979,68 +1127,27 @@ class GeminiAnalyzer {
         return {
             requestCount: this.requestCount,
             errorCount: this.errorCount,
-            successRate: this.requestCount > 0 ? (this.requestCount - this.errorCount) / this.requestCount : 0
+            successRate: this.requestCount > 0 ? (this.requestCount - this.errorCount) / this.requestCount : 0,
+            currentModel: this.currentModel
         };
     }
 }
-
-// =============== API Routes ===============
-app.post("/participant-map", (req, res, next) => {
-    try {
-        const result = participantManager.updateParticipants(req.body);
-        res.json({ success: true, ...result });
-    } catch (error) {
-        next(error);
-    }
-});
-
-app.get("/participant-map", (req, res) => {
-    const result = participantManager.getAll();
-    res.json({ success: true, ...result });
-});
-
-app.get("/api/sox/status", (req, res) => {
-    res.json({ success: true, status: audioDeviceManager.getStatus() });
-});
-
-app.post("/api/sox/start", async (req, res, next) => {
-    try {
-        const { device = "default" } = req.body;
-        const result = await audioDeviceManager.start(device);
-        res.json(result);
-    } catch (error) {
-        next(error);
-    }
-});
-
-app.post("/api/sox/stop", async (req, res, next) => {
-    try {
-        const result = await audioDeviceManager.stop();
-        res.json(result);
-    } catch (error) {
-        next(error);
-    }
-});
-
-app.get("/api/sox/devices", async (req, res, next) => {
-    try {
-        const result = await audioDeviceManager.getDevices();
-        res.json(result);
-    } catch (error) {
-        next(error);
-    }
-});
-
 const geminiAnalyzer = new GeminiAnalyzer();
 
-app.get("/api/analytics", (req, res) => {
-    res.json({
-        success: true,
-        gemini: geminiAnalyzer.getStats(),
-        participants: participantManager.getAll(),
-        sox: audioDeviceManager.getStatus()
-    });
+app.get("/api/gemini/models", async (req, res, next) => {
+    try {
+        const apiKey = process.env.GEMINI_API_KEY;
+        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
+        if (!response.ok) {
+            throw new Error(`Failed to fetch models: ${response.statusText}`);
+        }
+        const data = await response.json();
+        res.json({ success: true, models: data.models });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
+
 
 // =============== WebSocket Server ===============
 const server = http.createServer(app);
@@ -1062,7 +1169,7 @@ speechProcessor.on('transcript', (data) => {
     };
 
     wss.clients.forEach(client => {
-        if (client.readyState === 1) {
+        if (client.readyState === WebSocket.OPEN) {
             client.send(JSON.stringify(transcriptData));
         }
     });
@@ -1086,7 +1193,7 @@ speechProcessor.on('analysis', async (data) => {
         };
 
         wss.clients.forEach(client => {
-            if (client.readyState === 1) {
+            if (client.readyState === WebSocket.OPEN) {
                 client.send(JSON.stringify(enriched));
             }
         });
