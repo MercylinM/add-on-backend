@@ -3,7 +3,7 @@ dotenv.config();
 
 import express from "express";
 import bodyParser from "body-parser";
-import { WebSocketServer,  OPEN } from "ws";
+import { WebSocketServer, WebSocket } from "ws";
 import http from "http";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import speech from "@google-cloud/speech";
@@ -1173,7 +1173,6 @@ app.get("/api/gemini/models", async (req, res, next) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws/audio" });
 
-
 const speechProcessor = new SpeechProcessor();
 
 speechProcessor.on('transcript', (data) => {
@@ -1190,7 +1189,7 @@ speechProcessor.on('transcript', (data) => {
     };
 
     wss.clients.forEach(client => {
-        if (client.readyState === OPEN) {
+        if (client.readyState === WebSocket.OPEN) {
             client.send(JSON.stringify(transcriptData));
         }
     });
@@ -1214,7 +1213,7 @@ speechProcessor.on('analysis', async (data) => {
         };
 
         wss.clients.forEach(client => {
-            if (client.readyState === OPEN) {
+            if (client.readyState === WebSocket.OPEN) {
                 client.send(JSON.stringify(enriched));
             }
         });
