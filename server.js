@@ -143,6 +143,23 @@ class BotManager {
     async startBot(meetLink, duration = 60) {
         try {
             console.log(`[bot-manager] Starting bot for meeting: ${meetLink}`);
+            console.log(`[bot-manager] Using bot service URL: ${this.botUrl}`);
+
+
+            try {
+                const healthResponse = await fetch(`${this.botUrl}/health`);
+                if (!healthResponse.ok) {
+                    console.error(`[bot-manager] Bot service health check failed: ${healthResponse.status}`);
+                    const healthText = await healthResponse.text();
+                    console.error(`[bot-manager] Health check response: ${healthText.substring(0, 200)}`);
+                } else {
+                    const healthData = await healthResponse.json();
+                    console.log(`[bot-manager] Bot service health: ${JSON.stringify(healthData)}`);
+                }
+            } catch (healthError) {
+                console.error(`[bot-manager] Bot service health check error: ${healthError.message}`);
+                throw new Error(`Bot service is unreachable: ${healthError.message}`);
+            }
 
             const response = await fetch(`${this.botUrl}/start`, {
                 method: 'POST',
@@ -157,9 +174,12 @@ class BotManager {
 
             if (!response.ok) {
                 const errorText = await response.text();
-                console.error('[bot-manager] Bot service returned error:', response.status, errorText);
-                throw new Error(`Bot service returned ${response.status}: ${errorText}`);
+                console.error(`[bot-manager] Bot service returned error: ${response.status}`);
+                console.error(`[bot-manager] Error response content type: ${response.headers.get('content-type')}`);
+                console.error(`[bot-manager] Error response (first 500 chars): ${errorText.substring(0, 500)}`);
+                throw new Error(`Bot service returned ${response.status}: ${errorText.substring(0, 200)}`);
             }
+
 
             const contentType = response.headers.get('content-type');
             if (!contentType || !contentType.includes('application/json')) {
