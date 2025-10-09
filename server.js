@@ -26,7 +26,7 @@ const CONFIG = {
         encoding: 'LINEAR16',
         sampleRateHertz: 16000,
         languageCode: 'en-US',
-        streamingLimit: 290000,
+        streamingLimit: 600000,
         minSpeakerCount: 1,
         maxSpeakerCount: 6,
         enableWordTimeOffsets: true,
@@ -641,8 +641,9 @@ class SpeechProcessor {
         this.pendingRestart = false;
         this.speakerBuffer = {};
         this.lastSpeechTime = {};
-        this.streamingTimeout = options.streamingTimeout || 600000; // 10 minutes in ms
-
+        this.botConnected = false;
+        this.firstAudioReceived = false;
+        this.audioTimeout = null;
     }
 
     loadCredentials() {
@@ -690,25 +691,108 @@ class SpeechProcessor {
             .on('data', (stream) => this.handleSpeechData(stream))
             .on('end', () => this.handleStreamEnd());
 
+        console.log(`[speech-stream] Stream started (restart counter: ${this.restartCounter})`);
+        this.firstAudioReceived = false;
+
         // this.streamTimeout = setTimeout(() => {
         //     console.log('[speech-stream] Restarting due to time limit');
         //     this.restartStream();
         // }, CONFIG.SPEECH.streamingLimit);
 
         // console.log(`[speech-stream] Stream started (restart counter: ${this.restartCounter})`);
+    }
 
-        // this.recognizeStream = this.client
-        //     .streamingRecognize(request)
-        //     .on('error', (err) => this.handleStreamError(err))
-        //     .on('data', (stream) => this.handleSpeechData(stream))
-        //     .on('end', () => this.handleStreamEnd());
+    setBotConnected(connected) {
+        this.botConnected = connected;
+        console.log(`[speech-stream] Bot connected status: ${connected}`);
 
-        this.streamTimeout = setTimeout(() => {
-            console.log('[speech-stream] Restarting due to time limit');
+        if (!connected && this.isStreamAlive) {
+            this.setAudioTimeout(60000); // 1 minute timeout if bot disconnects
+        }
+    }
+
+    onFirstAudioReceived() {
+        if (!this.firstAudioReceived) {
+            this.firstAudioReceived = true;
+            console.log('[speech-stream] First audio received, setting longer timeout');
+            this.setAudioTimeout(CONFIG.SPEECH.streamingLimit); // Use your configured timeout
+        }
+    }
+
+    setAudioTimeout(timeout) {
+        if (this.audioTimeout) {
+            clearTimeout(this.audioTimeout);
+        }
+
+        this.audioTimeout = setTimeout(() => {
+            console.log('[speech-stream] Restarting due to audio timeout');
             this.restartStream();
-        }, this.streamingTimeout);
+        }, timeout);
 
-        console.log(`[speech-stream] Stream started with ${this.streamingTimeout / 60000} minute timeout (restart counter: ${this.restartCounter})`);
+        // console.log(`[speech-stream] Audio timeout set to ${timeout / 60000} minutes`);
+    }
+
+    createAudioStream() {
+        return new Writable({
+            write: (chunk, encoding, next) => {
+                try {
+                    if (!this.isStreamAlive || !this.recognizeStream) {
+                        return next();
+                    }
+
+                    if (!this.firstAudioReceived) {
+                        this.onFirstAudioReceived();
+                    }
+
+                    if (this.firstAudioReceived) {
+                        this.setAudioTimeout(CONFIG.SPEECH.streamingLimit);
+                    }
+
+                    if (this.newStream && this.lastAudioInput.length > 0) {
+                        const chunkTime = CONFIG.SPEECH.streamingLimit / this.lastAudioInput.length;
+                        if (chunkTime !== 0) {
+                            if (this.bridgingOffset < 0) {
+                                this.bridgingOffset = 0;
+                            }
+                            if (this.bridgingOffset > this.finalRequestEndTime) {
+                                this.bridgingOffset = this.finalRequestEndTime;
+                            }
+                            const chunksFromMS = Math.floor(
+                                (this.finalRequestEndTime - this.bridgingOffset) / chunkTime
+                            );
+                            this.bridgingOffset = Math.floor(
+                                (this.lastAudioInput.length - chunksFromMS) * chunkTime
+                            );
+
+                            for (let i = chunksFromMS; i < this.lastAudioInput.length; i++) {
+                                if (this.recognizeStream && this.isStreamAlive) {
+                                    this.recognizeStream.write(this.lastAudioInput[i]);
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
+                        this.newStream = false;
+                        this.lastAudioInput = [];
+                    }
+
+                    this.audioInput.push(chunk);
+
+                    if (this.recognizeStream && this.isStreamAlive) {
+                        this.recognizeStream.write(chunk);
+                    }
+
+                    next();
+                } catch (error) {
+                    console.error('[speech-stream] Error writing to stream:', error);
+                    next();
+                }
+            },
+
+            final() {
+                console.log('[speech-stream] Audio stream ended');
+            }
+        });
     }
 
     resetStreamState() {
@@ -875,60 +959,60 @@ class SpeechProcessor {
         return participantManager.participants[index]?.name || `Speaker ${label}`;
     }
 
-    createAudioStream() {
-        return new Writable({
-            write: (chunk, encoding, next) => {
-                try {
-                    if (!this.isStreamAlive || !this.recognizeStream) {
-                        return next();
-                    }
+    // createAudioStream() {
+    //     return new Writable({
+    //         write: (chunk, encoding, next) => {
+    //             try {
+    //                 if (!this.isStreamAlive || !this.recognizeStream) {
+    //                     return next();
+    //                 }
 
-                    if (this.newStream && this.lastAudioInput.length > 0) {
-                        const chunkTime = CONFIG.SPEECH.streamingLimit / this.lastAudioInput.length;
-                        if (chunkTime !== 0) {
-                            if (this.bridgingOffset < 0) {
-                                this.bridgingOffset = 0;
-                            }
-                            if (this.bridgingOffset > this.finalRequestEndTime) {
-                                this.bridgingOffset = this.finalRequestEndTime;
-                            }
-                            const chunksFromMS = Math.floor(
-                                (this.finalRequestEndTime - this.bridgingOffset) / chunkTime
-                            );
-                            this.bridgingOffset = Math.floor(
-                                (this.lastAudioInput.length - chunksFromMS) * chunkTime
-                            );
+    //                 if (this.newStream && this.lastAudioInput.length > 0) {
+    //                     const chunkTime = CONFIG.SPEECH.streamingLimit / this.lastAudioInput.length;
+    //                     if (chunkTime !== 0) {
+    //                         if (this.bridgingOffset < 0) {
+    //                             this.bridgingOffset = 0;
+    //                         }
+    //                         if (this.bridgingOffset > this.finalRequestEndTime) {
+    //                             this.bridgingOffset = this.finalRequestEndTime;
+    //                         }
+    //                         const chunksFromMS = Math.floor(
+    //                             (this.finalRequestEndTime - this.bridgingOffset) / chunkTime
+    //                         );
+    //                         this.bridgingOffset = Math.floor(
+    //                             (this.lastAudioInput.length - chunksFromMS) * chunkTime
+    //                         );
 
-                            for (let i = chunksFromMS; i < this.lastAudioInput.length; i++) {
-                                if (this.recognizeStream && this.isStreamAlive) {
-                                    this.recognizeStream.write(this.lastAudioInput[i]);
-                                } else {
-                                    break;
-                                }
-                            }
-                        }
-                        this.newStream = false;
-                        this.lastAudioInput = [];
-                    }
+    //                         for (let i = chunksFromMS; i < this.lastAudioInput.length; i++) {
+    //                             if (this.recognizeStream && this.isStreamAlive) {
+    //                                 this.recognizeStream.write(this.lastAudioInput[i]);
+    //                             } else {
+    //                                 break;
+    //                             }
+    //                         }
+    //                     }
+    //                     this.newStream = false;
+    //                     this.lastAudioInput = [];
+    //                 }
 
-                    this.audioInput.push(chunk);
+    //                 this.audioInput.push(chunk);
 
-                    if (this.recognizeStream && this.isStreamAlive) {
-                        this.recognizeStream.write(chunk);
-                    }
+    //                 if (this.recognizeStream && this.isStreamAlive) {
+    //                     this.recognizeStream.write(chunk);
+    //                 }
 
-                    next();
-                } catch (error) {
-                    console.error('[speech-stream] Error writing to stream:', error);
-                    next();
-                }
-            },
+    //                 next();
+    //             } catch (error) {
+    //                 console.error('[speech-stream] Error writing to stream:', error);
+    //                 next();
+    //             }
+    //         },
 
-            final() {
-                console.log('[speech-stream] Audio stream ended');
-            }
-        });
-    }
+    //         final() {
+    //             console.log('[speech-stream] Audio stream ended');
+    //         }
+    //     });
+    // }
 }
 
 Object.assign(SpeechProcessor.prototype, {
@@ -1188,7 +1272,7 @@ app.get("/api/gemini/models", async (req, res, next) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws/audio" });
 
-const speechProcessor = new SpeechProcessor({ streamingTimeout: 900000 });
+const speechProcessor = new SpeechProcessor();
 
 speechProcessor.on('transcript', (data) => {
     const { transcript, speaker, speakerTag, isFinal, timestamp } = data;
@@ -1238,7 +1322,7 @@ speechProcessor.on('analysis', async (data) => {
 });
 
 wss.on("connection", (client, req) => {
-    const origin = req.headers.origin || req.headers.referer || 'Unknown';
+    const origin = req.headers.origin;
 
     if (origin && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
         console.log('[server] WebSocket connection rejected from origin:', origin);
@@ -1248,10 +1332,17 @@ wss.on("connection", (client, req) => {
 
     console.log("[server] Bot audio WS connected from", origin);
 
+    speechProcessor.setBotConnected(true);
+
     let isFirstConnection = wss.clients.size === 1;
     let audioStream = null;
 
     audioStream = speechProcessor.createAudioStream();
+
+    // let isFirstConnection = wss.clients.size === 1;
+    // let audioStream = null;
+
+    // audioStream = speechProcessor.createAudioStream();
 
     if (isFirstConnection) {
         speechProcessor.startStream();
