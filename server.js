@@ -641,6 +641,8 @@ class SpeechProcessor {
         this.pendingRestart = false;
         this.speakerBuffer = {};
         this.lastSpeechTime = {};
+        this.streamingTimeout = options.streamingTimeout || 600000; // 10 minutes in ms
+
     }
 
     loadCredentials() {
@@ -688,12 +690,25 @@ class SpeechProcessor {
             .on('data', (stream) => this.handleSpeechData(stream))
             .on('end', () => this.handleStreamEnd());
 
+        // this.streamTimeout = setTimeout(() => {
+        //     console.log('[speech-stream] Restarting due to time limit');
+        //     this.restartStream();
+        // }, CONFIG.SPEECH.streamingLimit);
+
+        // console.log(`[speech-stream] Stream started (restart counter: ${this.restartCounter})`);
+
+        // this.recognizeStream = this.client
+        //     .streamingRecognize(request)
+        //     .on('error', (err) => this.handleStreamError(err))
+        //     .on('data', (stream) => this.handleSpeechData(stream))
+        //     .on('end', () => this.handleStreamEnd());
+
         this.streamTimeout = setTimeout(() => {
             console.log('[speech-stream] Restarting due to time limit');
             this.restartStream();
-        }, CONFIG.SPEECH.streamingLimit);
+        }, this.streamingTimeout);
 
-        console.log(`[speech-stream] Stream started (restart counter: ${this.restartCounter})`);
+        console.log(`[speech-stream] Stream started with ${this.streamingTimeout / 60000} minute timeout (restart counter: ${this.restartCounter})`);
     }
 
     resetStreamState() {
@@ -1173,7 +1188,7 @@ app.get("/api/gemini/models", async (req, res, next) => {
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server, path: "/ws/audio" });
 
-const speechProcessor = new SpeechProcessor();
+const speechProcessor = new SpeechProcessor({ streamingTimeout: 900000 });
 
 speechProcessor.on('transcript', (data) => {
     const { transcript, speaker, speakerTag, isFinal, timestamp } = data;
@@ -1223,7 +1238,7 @@ speechProcessor.on('analysis', async (data) => {
 });
 
 wss.on("connection", (client, req) => {
-    const origin = req.headers.origin;
+    const origin = req.headers.origin || req.headers.referer || 'Unknown';
 
     if (origin && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
         console.log('[server] WebSocket connection rejected from origin:', origin);
