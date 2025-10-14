@@ -818,6 +818,7 @@ const speechCallback = async (stream) => {
                             is_final: true
                         };
 
+                        // sending to backend
                         wss.clients.forEach(client => {
                             if (client.readyState === WebSocket.OPEN) {
                                 client.send(JSON.stringify(enriched));
@@ -1089,6 +1090,7 @@ async function runGeminiAnalysis(speaker, text) {
         return { summary: "", semantics: "", questions: [] };
     }
 }
+
 
 // =============== HTTP + WS Upgrade ===============
 const PORT = process.env.PORT || 3000;

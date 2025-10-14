@@ -644,6 +644,8 @@ class SpeechProcessor {
         this.botConnected = false;
         this.firstAudioReceived = false;
         this.audioTimeout = null;
+
+        this.maxStreamDuration = 280000; 
     }
 
     loadCredentials() {
@@ -691,15 +693,13 @@ class SpeechProcessor {
             .on('data', (stream) => this.handleSpeechData(stream))
             .on('end', () => this.handleStreamEnd());
 
-        console.log(`[speech-stream] Stream started (restart counter: ${this.restartCounter})`);
+        this.streamTimeout = setTimeout(() => {
+            console.log('[speech-stream] Restarting due to time limit (avoiding 305s API limit)');
+            this.restartStream();
+        }, this.maxStreamDuration);
+
+        console.log(`[speech-stream] Stream started with ${this.maxStreamDuration / 1000}s timeout (restart counter: ${this.restartCounter})`);
         this.firstAudioReceived = false;
-
-        // this.streamTimeout = setTimeout(() => {
-        //     console.log('[speech-stream] Restarting due to time limit');
-        //     this.restartStream();
-        // }, CONFIG.SPEECH.streamingLimit);
-
-        // console.log(`[speech-stream] Stream started (restart counter: ${this.restartCounter})`);
     }
 
     setBotConnected(connected) {
@@ -707,7 +707,7 @@ class SpeechProcessor {
         console.log(`[speech-stream] Bot connected status: ${connected}`);
 
         if (!connected && this.isStreamAlive) {
-            this.setAudioTimeout(60000); // 1 minute timeout if bot disconnects
+            this.setAudioTimeout(60000); 
         }
     }
 
@@ -715,7 +715,7 @@ class SpeechProcessor {
         if (!this.firstAudioReceived) {
             this.firstAudioReceived = true;
             console.log('[speech-stream] First audio received, setting longer timeout');
-            this.setAudioTimeout(CONFIG.SPEECH.streamingLimit); // Use your configured timeout
+            this.setAudioTimeout(this.maxStreamDuration); 
         }
     }
 
@@ -729,7 +729,7 @@ class SpeechProcessor {
             this.restartStream();
         }, timeout);
 
-        // console.log(`[speech-stream] Audio timeout set to ${timeout / 60000} minutes`);
+        console.log(`[speech-stream] Audio timeout set to ${timeout / 60000} minutes`);
     }
 
     createAudioStream() {
@@ -745,11 +745,11 @@ class SpeechProcessor {
                     }
 
                     if (this.firstAudioReceived) {
-                        this.setAudioTimeout(CONFIG.SPEECH.streamingLimit);
+                        this.resetStreamTimeout();
                     }
 
                     if (this.newStream && this.lastAudioInput.length > 0) {
-                        const chunkTime = CONFIG.SPEECH.streamingLimit / this.lastAudioInput.length;
+                        const chunkTime = this.maxStreamDuration / this.lastAudioInput.length;
                         if (chunkTime !== 0) {
                             if (this.bridgingOffset < 0) {
                                 this.bridgingOffset = 0;
@@ -795,6 +795,17 @@ class SpeechProcessor {
         });
     }
 
+    resetStreamTimeout() {
+        if (this.streamTimeout) {
+            clearTimeout(this.streamTimeout);
+        }
+
+        this.streamTimeout = setTimeout(() => {
+            console.log('[speech-stream] Restarting due to time limit (avoiding 305s API limit)');
+            this.restartStream();
+        }, this.maxStreamDuration);
+    }
+
     resetStreamState() {
         this.audioInput = [];
         this.lastAudioInput = [];
@@ -825,7 +836,7 @@ class SpeechProcessor {
 
         if (!this.pendingRestart) {
             this.pendingRestart = true;
-            if (err.code === 11) { 
+            if (err.code === 11) {
                 console.log('[speech-stream] Restarting due to timeout');
                 this.restartStream();
             } else {
@@ -856,6 +867,11 @@ class SpeechProcessor {
             this.streamTimeout = null;
         }
 
+        if (this.audioTimeout) {
+            clearTimeout(this.audioTimeout);
+            this.audioTimeout = null;
+        }
+
         this.isStreamAlive = false;
         this.cleanup();
 
@@ -875,7 +891,7 @@ class SpeechProcessor {
             this.startStream();
         }, delay);
     }
-   
+
     handleSpeechData(stream) {
         try {
             if (stream.results[0] && stream.results[0].resultEndTime) {
@@ -885,7 +901,7 @@ class SpeechProcessor {
             }
 
             const correctedTime =
-                this.resultEndTime - this.bridgingOffset + CONFIG.SPEECH.streamingLimit * this.restartCounter;
+                this.resultEndTime - this.bridgingOffset + this.maxStreamDuration * this.restartCounter;
 
             if (stream.results[0] && stream.results[0].alternatives[0]) {
                 const transcript = stream.results[0].alternatives[0].transcript;
@@ -958,61 +974,6 @@ class SpeechProcessor {
         const index = label.charCodeAt(0) - "A".charCodeAt(0);
         return participantManager.participants[index]?.name || `Speaker ${label}`;
     }
-
-    // createAudioStream() {
-    //     return new Writable({
-    //         write: (chunk, encoding, next) => {
-    //             try {
-    //                 if (!this.isStreamAlive || !this.recognizeStream) {
-    //                     return next();
-    //                 }
-
-    //                 if (this.newStream && this.lastAudioInput.length > 0) {
-    //                     const chunkTime = CONFIG.SPEECH.streamingLimit / this.lastAudioInput.length;
-    //                     if (chunkTime !== 0) {
-    //                         if (this.bridgingOffset < 0) {
-    //                             this.bridgingOffset = 0;
-    //                         }
-    //                         if (this.bridgingOffset > this.finalRequestEndTime) {
-    //                             this.bridgingOffset = this.finalRequestEndTime;
-    //                         }
-    //                         const chunksFromMS = Math.floor(
-    //                             (this.finalRequestEndTime - this.bridgingOffset) / chunkTime
-    //                         );
-    //                         this.bridgingOffset = Math.floor(
-    //                             (this.lastAudioInput.length - chunksFromMS) * chunkTime
-    //                         );
-
-    //                         for (let i = chunksFromMS; i < this.lastAudioInput.length; i++) {
-    //                             if (this.recognizeStream && this.isStreamAlive) {
-    //                                 this.recognizeStream.write(this.lastAudioInput[i]);
-    //                             } else {
-    //                                 break;
-    //                             }
-    //                         }
-    //                     }
-    //                     this.newStream = false;
-    //                     this.lastAudioInput = [];
-    //                 }
-
-    //                 this.audioInput.push(chunk);
-
-    //                 if (this.recognizeStream && this.isStreamAlive) {
-    //                     this.recognizeStream.write(chunk);
-    //                 }
-
-    //                 next();
-    //             } catch (error) {
-    //                 console.error('[speech-stream] Error writing to stream:', error);
-    //                 next();
-    //             }
-    //         },
-
-    //         final() {
-    //             console.log('[speech-stream] Audio stream ended');
-    //         }
-    //     });
-    // }
 }
 
 Object.assign(SpeechProcessor.prototype, {
@@ -1294,32 +1255,157 @@ speechProcessor.on('transcript', (data) => {
     });
 });
 
+// speechProcessor.on('analysis', async (data) => {
+//     const { speaker, text, speakerTag, timestamp } = data;
+
+//     try {
+//         const analysis = await geminiAnalyzer.analyze(speaker, text);
+
+//         const enriched = {
+//             transcript: text,
+//             speaker_name: speaker,
+//             speaker_tag: speakerTag,
+//             analysis: analysis,
+//             message_type: "enriched_transcript",
+//             end_of_turn: true,
+//             timestamp: timestamp,
+//             is_final: true
+//         };
+
+//         wss.clients.forEach(client => {
+//             if (client.readyState === WebSocket.OPEN) {
+//                 client.send(JSON.stringify(enriched));
+//             }
+//         });
+//     } catch (error) {
+//         console.error('[server] Error in Gemini analysis:', error);
+//     }
+// });
+
+// const DJANGO_URL = "http://127.0.0.1:8000/api/interview_conversations/";
+
+
+
+
+
+
+
+
+
+
+// const DJANGO_URL = "http://127.0.0.1:8000/api/interview_conversations/";
+
+// speechProcessor.on('analysis', async (data) => {
+//   const { speaker, text, speakerTag, timestamp } = data;
+//   try {
+//     const analysis = await geminiAnalyzer.analyze(speaker, text);
+// //     const enriched = {
+// //       interview: 54, 
+// //       question_text: "What is your experience with Python?",
+// //       expected_answer: "Should describe Python experience.", // Or map as needed
+// //       candidate_answer: text, // Using transcript as candidate answer
+// //     };
+// //     // Send to Django backend with the recruiter token
+// //     fetch(DJANGO_URL, {
+// //       method: "POST",
+// //       headers: {
+// //         "Content-Type": "application/json",
+// //         "Authorization": `Token ${process.env.DJANGO_API_TOKEN}`
+// //       },
+// //       body: JSON.stringify(enriched)
+// //     })
+// //     .then(res => res.json())
+// //     .then(response => console.log("[integration] Sent to Django:", response))
+// //     .catch(err => console.error("[integration] Django POST error:", err));
+
+// const djangoPayload = {
+//   interview_id: 54,   // or your dynamic interview ID
+//   summary: analysis.summary,
+//   semantics: analysis.semantics,
+//   questions: analysis.questions,
+//   timestamp: new Date().toISOString(),
+// };
+
+// fetch(DJANGO_URL, {
+//   method: "POST",
+//   headers: {
+//     "Content-Type": "application/json",
+//     "Authorization": `Token ${process.env.DJANGO_API_TOKEN}`
+//   },
+//   body: JSON.stringify(djangoPayload)
+// })
+// .then(res => res.json())
+// .then(response => console.log("[integration] Sent to Django:", response))
+// .catch(err => console.error("[integration] Django POST error:", err));
+
+
+//     // Optionally send to WebSocket clients
+//     wss.clients.forEach(client => {
+//       if (client.readyState === WebSocket.OPEN) {
+//         client.send(JSON.stringify(enriched));
+//       }
+//     });
+//   } catch (error) {
+//     console.error('[server] Error in Gemini analysis:', error);
+//   }
+// });
+
+
+const DJANGO_URL = "http://127.0.0.1:8000/api/interview_conversations/";
+
 speechProcessor.on('analysis', async (data) => {
-    const { speaker, text, speakerTag, timestamp } = data;
-
+    const { speaker, text } = data;
     try {
-        const analysis = await geminiAnalyzer.analyze(speaker, text);
+      const analysis = await geminiAnalyzer.analyze(speaker, text);
 
-        const enriched = {
-            transcript: text,
-            speaker_name: speaker,
-            speaker_tag: speakerTag,
-            analysis: analysis,
-            message_type: "enriched_transcript",
-            end_of_turn: true,
-            timestamp: timestamp,
-            is_final: true
-        };
+      // Log for debugging
+      console.log("Analysis:", analysis);
+      console.log("Transcript:", text);
 
-        wss.clients.forEach(client => {
-            if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify(enriched));
-            }
-        });
+      // Fallbacks for empty fields
+      const djangoPayload = {
+        interview: 54,
+        question_text: analysis.summary || text || "No summary provided.",
+        expected_answer: analysis.semantics || "No expected answer.",
+        candidate_answer: text || "No answer."
+      };
+
+      console.log("Payload to Django:", djangoPayload);
+
+      fetch(DJANGO_URL, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Token ${process.env.DJANGO_API_TOKEN}`
+        },
+        body: JSON.stringify(djangoPayload)
+      })
+      .then(res => res.json())
+      .then(response => console.log("[integration] Sent to Django:", response))
+      .catch(err => console.error("[integration] Django POST error:", err));
+
+      wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify(djangoPayload));
+        }
+      });
     } catch (error) {
-        console.error('[server] Error in Gemini analysis:', error);
+      console.error('[server] Error in Gemini analysis:', error);
     }
 });
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 wss.on("connection", (client, req) => {
     const origin = req.headers.origin;
