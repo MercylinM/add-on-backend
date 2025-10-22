@@ -36,9 +36,9 @@ const CONFIG = {
         model: 'latest_long'
     },
     BUFFER: {
-        minSegmentLength: 50,    
-        maxSegmentLength: 500,   
-        silenceThresholdMs: 2000 
+        minSegmentLength: 50,
+        maxSegmentLength: 500,
+        silenceThresholdMs: 2000
     },
     CORS: {
         allowedOrigins: [
@@ -59,11 +59,15 @@ class ServerError extends Error {
 }
 
 const validateEnvironment = () => {
-    const required = ['GEMINI_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS'];
+    const required = ['GEMINI_API_KEY', 'GOOGLE_APPLICATION_CREDENTIALS', 'DJANGO_API_TOKEN'];
     const missing = required.filter(key => !process.env[key]);
 
     if (missing.length > 0) {
         throw new ServerError(`Missing required environment variables: ${missing.join(', ')}`);
+    }
+
+    if (!process.env.DJANGO_API_URL) {
+        console.warn('[server] DJANGO_API_URL not set, using default: http://localhost:8000/api');
     }
 };
 
@@ -132,6 +136,102 @@ app.get('/', (req, res) => {
     });
 });
 
+// =============== Interview Management ===============
+class InterviewManager {
+    constructor() {
+        this.currentInterview = null;
+        this.interviews = new Map();
+        this.djangoUrl = process.env.DJANGO_API_URL || 'http://localhost:8000/api';
+        this.apiToken = process.env.DJANGO_API_TOKEN;
+    }
+
+    async fetchInterviews() {
+        try {
+            console.log('[interview-manager] Fetching interviews from Django...');
+
+            const response = await fetch(`${this.djangoUrl}/interview/`, {
+                headers: {
+                    'Authorization': `Token ${this.apiToken}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Failed to fetch interviews: ${response.status} ${response.statusText}`);
+            }
+
+            const data = await response.json();
+            console.log(`[interview-manager] Loaded ${data.length} interviews`);
+
+
+            this.interviews.clear();
+
+            data.forEach(interview => {
+                this.interviews.set(interview.interview_id, interview);
+            });
+
+            return data;
+        } catch (error) {
+            console.error('[interview-manager] Error fetching interviews:', error);
+            throw new ServerError(`Failed to fetch interviews: ${error.message}`, 500);
+        }
+    }
+
+    async getInterviewById(interviewId) {
+        if (this.interviews.has(interviewId)) {
+            return this.interviews.get(interviewId);
+        }
+
+        try {
+            const response = await fetch(`${this.djangoUrl}/interview/${interviewId}/`, {
+                headers: {
+                    'Authorization': `Token ${this.apiToken}`,
+                    'Content-Type': 'application/json'
+                }
+            });
+
+            if (!response.ok) {
+                throw new Error(`Interview ${interviewId} not found`);
+            }
+
+            const interview = await response.json();
+            this.interviews.set(interviewId, interview);
+            return interview;
+        } catch (error) {
+            console.error(`[interview-manager] Error fetching interview ${interviewId}:`, error);
+            return null;
+        }
+    }
+
+    setCurrentInterview(interviewId, meetLink, duration) {
+        this.currentInterview = {
+            id: interviewId,
+            meet_link: meetLink,
+            duration: duration,
+            startTime: new Date().toISOString(),
+            status: 'starting'
+        };
+
+        console.log(`[interview-manager] Set current interview: ID ${interviewId}, Meet: ${meetLink}`);
+        return this.currentInterview;
+    }
+
+    getCurrentInterview() {
+        return this.currentInterview;
+    }
+
+    clearCurrentInterview() {
+        this.currentInterview = null;
+        console.log('[interview-manager] Cleared current interview');
+    }
+
+    getAllInterviews() {
+        return Array.from(this.interviews.values());
+    }
+}
+
+const interviewManager = new InterviewManager();
+
 // =============== Bot Management ===============
 class BotManager {
     constructor() {
@@ -144,7 +244,6 @@ class BotManager {
         try {
             console.log(`[bot-manager] Starting bot for meeting: ${meetLink}`);
             console.log(`[bot-manager] Using bot service URL: ${this.botUrl}`);
-
 
             try {
                 const healthResponse = await fetch(`${this.botUrl}/health`);
@@ -167,7 +266,7 @@ class BotManager {
                     'Content-Type': 'application/json',
                 },
                 body: JSON.stringify({
-                    meet_link: meetLink,  
+                    meet_link: meetLink,
                     duration: duration
                 })
             });
@@ -179,7 +278,6 @@ class BotManager {
                 console.error(`[bot-manager] Error response (first 500 chars): ${errorText.substring(0, 500)}`);
                 throw new Error(`Bot service returned ${response.status}: ${errorText.substring(0, 200)}`);
             }
-
 
             const contentType = response.headers.get('content-type');
             if (!contentType || !contentType.includes('application/json')) {
@@ -327,10 +425,13 @@ class BotManager {
 const botManager = new BotManager();
 
 // =============== Bot Management API Routes ===============
-
 app.post("/api/bot/start", async (req, res, next) => {
     try {
-        const { meet_link, duration = 60 } = req.body;
+        const { interview_id, meet_link, duration = 60 } = req.body;
+
+        if (!interview_id) {
+            throw new ServerError('Interview ID is required', 400);
+        }
 
         if (!meet_link) {
             throw new ServerError('Meeting link is required', 400);
@@ -340,8 +441,25 @@ app.post("/api/bot/start", async (req, res, next) => {
             throw new ServerError('Invalid Google Meet link', 400);
         }
 
+        const interview = await interviewManager.getInterviewById(interview_id);
+        if (!interview) {
+            throw new ServerError(`Interview with ID ${interview_id} not found`, 404);
+        }
+
+        interviewManager.setCurrentInterview(interview_id, meet_link, duration);
+
         const result = await botManager.startBot(meet_link, duration);
-        res.json(result);
+
+        res.json({
+            ...result,
+            interview_id: interview_id,
+            interview_data: {
+                id: interview.id,
+                title: interview.title || `Interview ${interview.id}`,
+                candidate_name: interview.candidate_name || 'Unknown Candidate',
+                position: interview.position || 'Unknown Position'
+            }
+        });
 
     } catch (error) {
         next(error);
@@ -375,30 +493,79 @@ app.get("/api/bot/health", async (req, res, next) => {
     }
 });
 
-app.get("/api/analytics", async (req, res) => {
+// =============== Interview Management API Routes ===============
+app.get("/api/interviews", async (req, res, next) => {
     try {
-        const botStatus = await botManager.getBotStatus().catch(() => ({
-            success: false,
-            status: 'unreachable'
-        }));
+        const interviews = await interviewManager.fetchInterviews();
+        res.json({
+            success: true,
+            interviews: interviews,
+            count: interviews.length
+        });
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.get("/api/interviews/current", async (req, res, next) => {
+    try {
+        const currentInterview = interviewManager.getCurrentInterview();
+
+        if (!currentInterview) {
+            return res.json({
+                success: true,
+                current_interview: null,
+                message: "No active interview"
+            });
+        }
+
+        // Get full interview details
+        const interviewDetails = await interviewManager.getInterviewById(currentInterview.id);
 
         res.json({
             success: true,
-            gemini: geminiAnalyzer.getStats(),
-            participants: participantManager.getAll(),
-            sox: audioDeviceManager.getStatus(),
-            bot: botStatus.success ? botStatus : { status: 'unreachable' },
-            timestamp: new Date().toISOString()
+            current_interview: {
+                ...currentInterview,
+                details: interviewDetails
+            }
         });
     } catch (error) {
+        next(error);
+    }
+});
+
+app.post("/api/interviews/clear", async (req, res, next) => {
+    try {
+        interviewManager.clearCurrentInterview();
         res.json({
             success: true,
-            gemini: geminiAnalyzer.getStats(),
-            participants: participantManager.getAll(),
-            sox: audioDeviceManager.getStatus(),
-            bot: { status: 'error', error: error.message },
-            timestamp: new Date().toISOString()
+            message: "Current interview cleared"
         });
+    } catch (error) {
+        next(error);
+    }
+});
+
+app.get("/api/interviews/:id", async (req, res, next) => {
+    try {
+        const interviewId = parseInt(req.params.id);
+
+        if (isNaN(interviewId)) {
+            throw new ServerError('Invalid interview ID', 400);
+        }
+
+        const interview = await interviewManager.getInterviewById(interviewId);
+
+        if (!interview) {
+            throw new ServerError(`Interview ${interviewId} not found`, 404);
+        }
+
+        res.json({
+            success: true,
+            interview: interview
+        });
+    } catch (error) {
+        next(error);
     }
 });
 
@@ -593,7 +760,7 @@ class AudioDeviceManager {
                     process.kill(this.status.pid, 'SIGKILL');
                 }
             }, 5000);
- 
+
             this.resetStatus();
             this.soxProcess = null;
 
@@ -622,6 +789,112 @@ class AudioDeviceManager {
 
 const audioDeviceManager = new AudioDeviceManager();
 
+// =============== Question/Answer Extraction ===============
+function extractQuestionAndAnswer(transcript) {
+    const commonQuestionPatterns = [
+        /(?:could you|can you|tell me|describe|what|how|why|when).*\?/gi,
+        /(?:tell me about|describe a time|give an example|explain).*?(?=[.!?]|$)/gi
+    ];
+
+    let detectedQuestion = '';
+    let candidateAnswer = transcript;
+
+    for (const pattern of commonQuestionPatterns) {
+        const matches = transcript.match(pattern);
+        if (matches && matches.length > 0) {
+            detectedQuestion = matches[0].trim();
+
+            candidateAnswer = transcript.replace(detectedQuestion, '').trim();
+
+            if (detectedQuestion) break;
+        }
+    }
+
+    if (!detectedQuestion) {
+        const sentences = transcript.split(/[.!?]+/).filter(s => s.trim().length > 0);
+
+        const potentialQuestions = sentences.filter(s =>
+            s.length < 100 &&
+            (s.toLowerCase().includes('?') ||
+                s.toLowerCase().includes('could you') ||
+                s.toLowerCase().includes('can you') ||
+                s.toLowerCase().includes('tell me') ||
+                s.toLowerCase().includes('what') ||
+                s.toLowerCase().includes('how') ||
+                s.toLowerCase().includes('why'))
+        );
+
+        if (potentialQuestions.length > 0) {
+            detectedQuestion = potentialQuestions[0].trim();
+            candidateAnswer = transcript.replace(detectedQuestion, '').trim();
+        }
+    }
+
+    return {
+        detectedQuestion,
+        candidateAnswer: candidateAnswer || transcript
+    };
+}
+
+// =============== Interview Question Mapper ===============
+class InterviewQuestionMapper {
+    constructor() {
+        this.commonQuestions = [
+            "tell me about yourself",
+            "what are your strengths",
+            "what are your weaknesses",
+            "why do you want to work here",
+            "where do you see yourself in 5 years",
+            "tell me about a time you solved a difficult problem",
+            "describe a challenging situation",
+            "how do you handle pressure",
+            "what is your greatest achievement",
+            "why should we hire you",
+            "how do you handle conflict",
+            "describe your leadership style",
+            "what are your salary expectations",
+            "do you have any questions for us"
+        ];
+    }
+
+    findMatchingQuestion(transcript) {
+        const cleanTranscript = transcript.toLowerCase();
+
+        for (const question of this.commonQuestions) {
+            if (cleanTranscript.includes(question) ||
+                this.calculateSimilarity(cleanTranscript, question) > 0.7) {
+                return question;
+            }
+        }
+
+        const questionMatch = transcript.match(/(?:could you|can you|tell me|describe|what|how|why).*\?/i);
+        if (questionMatch) {
+            return questionMatch[0];
+        }
+
+        return null;
+    }
+
+    calculateSimilarity(str1, str2) {
+        const words1 = str1.split(' ');
+        const words2 = str2.split(' ');
+        const intersection = words1.filter(word => words2.includes(word));
+        return intersection.length / Math.max(words1.length, words2.length);
+    }
+
+    extractAnswer(transcript, question) {
+        if (!question) return transcript;
+
+        const questionIndex = transcript.toLowerCase().indexOf(question.toLowerCase());
+        if (questionIndex !== -1) {
+            return transcript.substring(questionIndex + question.length).trim();
+        }
+        return transcript;
+    }
+}
+
+const questionMapper = new InterviewQuestionMapper();
+
 // ===============  Speech Processing ===============
 class SpeechProcessor {
     constructor() {
@@ -645,7 +918,7 @@ class SpeechProcessor {
         this.firstAudioReceived = false;
         this.audioTimeout = null;
 
-        this.maxStreamDuration = 280000; 
+        this.maxStreamDuration = 280000;
     }
 
     loadCredentials() {
@@ -707,7 +980,7 @@ class SpeechProcessor {
         console.log(`[speech-stream] Bot connected status: ${connected}`);
 
         if (!connected && this.isStreamAlive) {
-            this.setAudioTimeout(60000); 
+            this.setAudioTimeout(60000);
         }
     }
 
@@ -715,7 +988,7 @@ class SpeechProcessor {
         if (!this.firstAudioReceived) {
             this.firstAudioReceived = true;
             console.log('[speech-stream] First audio received, setting longer timeout');
-            this.setAudioTimeout(this.maxStreamDuration); 
+            this.setAudioTimeout(this.maxStreamDuration);
         }
     }
 
@@ -996,9 +1269,9 @@ class GeminiAnalyzer {
     constructor() {
         this.genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
         this.model = this.genAI.getGenerativeModel({
-            model: "gemini-2.5-flash", 
+            model: "gemini-2.5-flash",
             generationConfig: {
-                temperature: 0.3, 
+                temperature: 0.3,
                 topK: 40,
                 topP: 0.95,
                 maxOutputTokens: 2048,
@@ -1019,18 +1292,23 @@ class GeminiAnalyzer {
         this.requestCount++;
 
         const prompt = `
-            You are an AI assistant analyzing interview conversations. Analyze the following transcript and provide insights.
+            You are an AI assistant analyzing interview conversations. Analyze the following transcript and identify:
+            1. The interview question being asked (if any)
+            2. The candidate's answer
+            3. Key insights about the answer
 
             Speaker: ${speaker}
             Transcript: "${text}"
 
             Please provide a JSON response with the following structure:
             {
-                "summary": "Brief one-sentence summary of what was said",
+                "detected_question": "The actual interview question that was asked, if identifiable",
+                "candidate_answer_summary": "Brief summary of the candidate's response",
                 "semantics": "Key semantic meaning, skills, experience, or attitudes mentioned",
                 "questions": ["Question 1 for follow-up", "Question 2 for follow-up"],
                 "confidence": 0.95,
-                "keywords": ["keyword1", "keyword2", "keyword3"]
+                "keywords": ["keyword1", "keyword2", "keyword3"],
+                "answer_quality": "Assessment of answer quality (excellent/good/fair/poor)"
             }
 
             Important: Return ONLY valid JSON, no additional text or markdown.
@@ -1078,18 +1356,23 @@ class GeminiAnalyzer {
             });
 
             const prompt = `
-                You are an AI assistant analyzing interview conversations. Analyze the following transcript and provide insights.
+                You are an AI assistant analyzing interview conversations. Analyze the following transcript and identify:
+                1. The interview question being asked (if any)
+                2. The candidate's answer
+                3. Key insights about the answer
 
                 Speaker: ${speaker}
                 Transcript: "${text}"
 
                 Please provide a JSON response with:
                 {
-                    "summary": "Brief summary",
+                    "detected_question": "The actual interview question",
+                    "candidate_answer_summary": "Brief summary",
                     "semantics": "Key meaning",
                     "questions": ["Question 1", "Question 2"],
                     "confidence": 0.9,
-                    "keywords": ["kw1", "kw2"]
+                    "keywords": ["kw1", "kw2"],
+                    "answer_quality": "good"
                 }
 
                 Return ONLY valid JSON.
@@ -1143,11 +1426,13 @@ class GeminiAnalyzer {
             const parsed = JSON.parse(cleanedRaw);
 
             return {
-                summary: parsed.summary || "No summary available",
+                detected_question: parsed.detected_question || "",
+                candidate_answer_summary: parsed.candidate_answer_summary || "No summary available",
                 semantics: parsed.semantics || "No semantic analysis available",
                 questions: Array.isArray(parsed.questions) ? parsed.questions : ["Could you tell me more about that?"],
                 confidence: typeof parsed.confidence === 'number' ? parsed.confidence : 0.8,
-                keywords: Array.isArray(parsed.keywords) ? parsed.keywords : []
+                keywords: Array.isArray(parsed.keywords) ? parsed.keywords : [],
+                answer_quality: parsed.answer_quality || "unknown"
             };
 
         } catch (parseError) {
@@ -1161,14 +1446,16 @@ class GeminiAnalyzer {
     extractFallbackData(cleanedRaw) {
         const lines = cleanedRaw.split('\n').filter(line => line.trim().length > 0);
 
-        let summary = "Analysis completed but format issue";
+        let detected_question = "";
+        let candidate_answer_summary = "Analysis completed but format issue";
         let semantics = "";
         let questions = ["Could you elaborate on that?"];
+        let answer_quality = "unknown";
 
         if (lines.length > 0) {
             const firstLine = lines[0].replace(/["{}]/g, '').trim();
             if (firstLine.length > 10 && !firstLine.includes('{') && !firstLine.includes('}')) {
-                summary = firstLine.substring(0, 150);
+                candidate_answer_summary = firstLine.substring(0, 150);
             }
         }
 
@@ -1185,21 +1472,25 @@ class GeminiAnalyzer {
         }
 
         return {
-            summary,
+            detected_question,
+            candidate_answer_summary,
             semantics,
             questions,
             confidence: 0.5,
-            keywords: []
+            keywords: [],
+            answer_quality
         };
     }
 
     getFallbackResponse() {
         return {
-            summary: "Analysis unavailable - processing error",
+            detected_question: "",
+            candidate_answer_summary: "Analysis unavailable - processing error",
             semantics: "",
             questions: [],
             confidence: 0.0,
-            keywords: []
+            keywords: [],
+            answer_quality: "unknown"
         };
     }
 
@@ -1212,22 +1503,8 @@ class GeminiAnalyzer {
         };
     }
 }
+
 const geminiAnalyzer = new GeminiAnalyzer();
-
-app.get("/api/gemini/models", async (req, res, next) => {
-    try {
-        const apiKey = process.env.GEMINI_API_KEY;
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`);
-        if (!response.ok) {
-            throw new Error(`Failed to fetch models: ${response.statusText}`);
-        }
-        const data = await response.json();
-        res.json({ success: true, models: data.models });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
 
 // =============== WebSocket Server ===============
 const server = http.createServer(app);
@@ -1255,157 +1532,96 @@ speechProcessor.on('transcript', (data) => {
     });
 });
 
-// speechProcessor.on('analysis', async (data) => {
-//     const { speaker, text, speakerTag, timestamp } = data;
-
-//     try {
-//         const analysis = await geminiAnalyzer.analyze(speaker, text);
-
-//         const enriched = {
-//             transcript: text,
-//             speaker_name: speaker,
-//             speaker_tag: speakerTag,
-//             analysis: analysis,
-//             message_type: "enriched_transcript",
-//             end_of_turn: true,
-//             timestamp: timestamp,
-//             is_final: true
-//         };
-
-//         wss.clients.forEach(client => {
-//             if (client.readyState === WebSocket.OPEN) {
-//                 client.send(JSON.stringify(enriched));
-//             }
-//         });
-//     } catch (error) {
-//         console.error('[server] Error in Gemini analysis:', error);
-//     }
-// });
-
-// const DJANGO_URL = "http://127.0.0.1:8000/api/interview_conversations/";
-
-
-
-
-
-
-
-
-
-
-// const DJANGO_URL = "http://127.0.0.1:8000/api/interview_conversations/";
-
-// speechProcessor.on('analysis', async (data) => {
-//   const { speaker, text, speakerTag, timestamp } = data;
-//   try {
-//     const analysis = await geminiAnalyzer.analyze(speaker, text);
-// //     const enriched = {
-// //       interview: 54, 
-// //       question_text: "What is your experience with Python?",
-// //       expected_answer: "Should describe Python experience.", // Or map as needed
-// //       candidate_answer: text, // Using transcript as candidate answer
-// //     };
-// //     // Send to Django backend with the recruiter token
-// //     fetch(DJANGO_URL, {
-// //       method: "POST",
-// //       headers: {
-// //         "Content-Type": "application/json",
-// //         "Authorization": `Token ${process.env.DJANGO_API_TOKEN}`
-// //       },
-// //       body: JSON.stringify(enriched)
-// //     })
-// //     .then(res => res.json())
-// //     .then(response => console.log("[integration] Sent to Django:", response))
-// //     .catch(err => console.error("[integration] Django POST error:", err));
-
-// const djangoPayload = {
-//   interview_id: 54,   // or your dynamic interview ID
-//   summary: analysis.summary,
-//   semantics: analysis.semantics,
-//   questions: analysis.questions,
-//   timestamp: new Date().toISOString(),
-// };
-
-// fetch(DJANGO_URL, {
-//   method: "POST",
-//   headers: {
-//     "Content-Type": "application/json",
-//     "Authorization": `Token ${process.env.DJANGO_API_TOKEN}`
-//   },
-//   body: JSON.stringify(djangoPayload)
-// })
-// .then(res => res.json())
-// .then(response => console.log("[integration] Sent to Django:", response))
-// .catch(err => console.error("[integration] Django POST error:", err));
-
-
-//     // Optionally send to WebSocket clients
-//     wss.clients.forEach(client => {
-//       if (client.readyState === WebSocket.OPEN) {
-//         client.send(JSON.stringify(enriched));
-//       }
-//     });
-//   } catch (error) {
-//     console.error('[server] Error in Gemini analysis:', error);
-//   }
-// });
-
-
-const DJANGO_URL = "http://127.0.0.1:8000/api/interview_conversations/";
-
 speechProcessor.on('analysis', async (data) => {
-    const { speaker, text } = data;
+    const { speaker, text, timestamp } = data;
+
     try {
-      const analysis = await geminiAnalyzer.analyze(speaker, text);
+        const analysis = await geminiAnalyzer.analyze(speaker, text);
 
-      // Log for debugging
-      console.log("Analysis:", analysis);
-      console.log("Transcript:", text);
+        console.log("Analysis completed:", {
+            speaker,
+            text_length: text.length,
+            summary: analysis.candidate_answer_summary,
+            confidence: analysis.confidence
+        });
 
-      // Fallbacks for empty fields
-      const djangoPayload = {
-        interview: 54,
-        question_text: analysis.summary || text || "No summary provided.",
-        expected_answer: analysis.semantics || "No expected answer.",
-        candidate_answer: text || "No answer."
-      };
+        const currentInterview = interviewManager.getCurrentInterview();
 
-      console.log("Payload to Django:", djangoPayload);
-
-      fetch(DJANGO_URL, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Authorization": `Token ${process.env.DJANGO_API_TOKEN}`
-        },
-        body: JSON.stringify(djangoPayload)
-      })
-      .then(res => res.json())
-      .then(response => console.log("[integration] Sent to Django:", response))
-      .catch(err => console.error("[integration] Django POST error:", err));
-
-      wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify(djangoPayload));
+        if (!currentInterview) {
+            console.warn('[integration] No current interview set, skipping Django submission');
+            return;
         }
-      });
+
+        const { detectedQuestion, candidateAnswer } = extractQuestionAndAnswer(text);
+
+        const mappedQuestion = questionMapper.findMatchingQuestion(text);
+        const finalQuestion = mappedQuestion || analysis.detected_question || detectedQuestion || analysis.candidate_answer_summary;
+        const finalAnswer = questionMapper.extractAnswer(text, finalQuestion) || candidateAnswer || text;
+
+        const djangoPayload = {
+            interview: currentInterview.id,
+            question_text: finalQuestion,
+            expected_answer: analysis.semantics,
+            candidate_answer: finalAnswer,
+            speaker_label: speaker,
+            analysis_confidence: analysis.confidence,
+            keywords: analysis.keywords,
+            follow_up_questions: analysis.questions,
+            answer_quality: analysis.answer_quality,
+            transcript_segment: text,
+            timestamp: timestamp || new Date().toISOString()
+        };
+
+        console.log("Payload to Django:", {
+            interview_id: djangoPayload.interview,
+            question: djangoPayload.question_text?.substring(0, 100) + "...",
+            candidate_answer_length: djangoPayload.candidate_answer?.length,
+            speaker: djangoPayload.speaker_label,
+            answer_quality: djangoPayload.answer_quality
+        });
+
+        fetch(`${interviewManager.djangoUrl}/interview_conversations/`, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Token ${interviewManager.apiToken}`
+            },
+            body: JSON.stringify(djangoPayload)
+        })
+            .then(async response => {
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+                return response.json();
+            })
+            .then(responseData => {
+                console.log("[integration] Successfully sent to Django. Conversation ID:", responseData.conversation_id);
+            })
+            .catch(err => {
+                console.error("[integration] Django POST error:", err.message);
+            });
+
+        const wsPayload = {
+            type: "analysis",
+            interview_id: currentInterview.id,
+            speaker: speaker,
+            question: djangoPayload.question_text,
+            candidate_answer: djangoPayload.candidate_answer,
+            analysis: analysis,
+            timestamp: new Date().toISOString()
+        };
+
+        wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify(wsPayload));
+            }
+        });
+
     } catch (error) {
-      console.error('[server] Error in Gemini analysis:', error);
+        console.error('[server] Error in analysis pipeline:', error);
     }
 });
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 wss.on("connection", (client, req) => {
     const origin = req.headers.origin;
@@ -1424,11 +1640,6 @@ wss.on("connection", (client, req) => {
     let audioStream = null;
 
     audioStream = speechProcessor.createAudioStream();
-
-    // let isFirstConnection = wss.clients.size === 1;
-    // let audioStream = null;
-
-    // audioStream = speechProcessor.createAudioStream();
 
     if (isFirstConnection) {
         speechProcessor.startStream();
@@ -1468,6 +1679,41 @@ wss.on("connection", (client, req) => {
     client.on("error", (error) => {
         console.error("[server] WebSocket client error:", error);
     });
+});
+
+// =============== Analytics Endpoint ===============
+app.get("/api/analytics", async (req, res) => {
+    try {
+        const botStatus = await botManager.getBotStatus().catch(() => ({
+            success: false,
+            status: 'unreachable'
+        }));
+
+        const currentInterview = interviewManager.getCurrentInterview();
+
+        res.json({
+            success: true,
+            gemini: geminiAnalyzer.getStats(),
+            participants: participantManager.getAll(),
+            sox: audioDeviceManager.getStatus(),
+            bot: botStatus.success ? botStatus : { status: 'unreachable' },
+            interview: {
+                current: currentInterview,
+                total_loaded: interviewManager.getAllInterviews().length
+            },
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.json({
+            success: true,
+            gemini: geminiAnalyzer.getStats(),
+            participants: participantManager.getAll(),
+            sox: audioDeviceManager.getStatus(),
+            bot: { status: 'error', error: error.message },
+            interview: { current: null, error: error.message },
+            timestamp: new Date().toISOString()
+        });
+    }
 });
 
 // =============== Server Startup ===============
@@ -1519,5 +1765,4 @@ const gracefulShutdown = async () => {
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
-// Start the server
 startServer();
