@@ -44,6 +44,7 @@ const CONFIG = {
         allowedOrigins: [
             'https://recos-meet-addon.vercel.app',
             'http://localhost:3000',
+            'http://localhost:3001',
             'http://localhost:10000',
             'https://gmeet-bot.onrender.com'
         ]
@@ -70,6 +71,7 @@ const validateEnvironment = () => {
         console.warn('[server] DJANGO_API_URL not set, using default: http://localhost:8000/api');
     }
 };
+
 
 // =============== Express Setup ===============
 const app = express();
@@ -145,13 +147,13 @@ class InterviewManager {
         this.apiToken = process.env.DJANGO_API_TOKEN;
     }
 
-    async fetchInterviews() {
+    async fetchInterviews(token) {
         try {
             console.log('[interview-manager] Fetching interviews from Django...');
 
             const response = await fetch(`${this.djangoUrl}/interview/`, {
                 headers: {
-                    'Authorization': `Token ${this.apiToken}`,
+                    'Authorization': `Token ${token}`,
                     'Content-Type': 'application/json'
                 }
             });
@@ -177,7 +179,7 @@ class InterviewManager {
         }
     }
 
-    async getInterviewById(interviewId) {
+    async getInterviewById(interviewId, token) {
         if (this.interviews.has(interviewId)) {
             return this.interviews.get(interviewId);
         }
@@ -185,7 +187,7 @@ class InterviewManager {
         try {
             const response = await fetch(`${this.djangoUrl}/interview/${interviewId}/`, {
                 headers: {
-                    'Authorization': `Token ${this.apiToken}`,
+                    'Authorization': `Token ${token}`,
                     'Content-Type': 'application/json'
                 }
             });
@@ -203,11 +205,12 @@ class InterviewManager {
         }
     }
 
-    setCurrentInterview(interviewId, meetLink, duration) {
+    setCurrentInterview(interviewId, meetLink, duration, token) {
         this.currentInterview = {
             id: interviewId,
             meet_link: meetLink,
             duration: duration,
+            token: token,
             startTime: new Date().toISOString(),
             status: 'starting'
         };
@@ -240,7 +243,7 @@ class BotManager {
         this.status = 'idle';
     }
 
-    async startBot(meetLink, duration = 60) {
+    async startBot(meetLink, duration = 60, token, interview_id) {
         try {
             console.log(`[bot-manager] Starting bot for meeting: ${meetLink}`);
             console.log(`[bot-manager] Using bot service URL: ${this.botUrl}`);
@@ -267,7 +270,9 @@ class BotManager {
                 },
                 body: JSON.stringify({
                     meet_link: meetLink,
-                    duration: duration
+                    duration: duration,
+                    token: `Token ${token}`,
+                    interview_id: interview_id
                 })
             });
 
@@ -425,12 +430,18 @@ class BotManager {
 const botManager = new BotManager();
 
 // =============== Bot Management API Routes ===============
+
 app.post("/api/bot/start", async (req, res, next) => {
+    console.log('Request Body:', req.body);
     try {
-        const { interview_id, meet_link, duration = 60 } = req.body;
+        const { interview_id, auth_token, meet_link, duration = 60 } = req.body;
 
         if (!interview_id) {
             throw new ServerError('Interview ID is required', 400);
+        }
+
+        if (!auth_token ) {
+            throw new ServerError('Invalid or missing auth token', 401);
         }
 
         if (!meet_link) {
@@ -441,15 +452,15 @@ app.post("/api/bot/start", async (req, res, next) => {
             throw new ServerError('Invalid Google Meet link', 400);
         }
 
-        const interview = await interviewManager.getInterviewById(interview_id);
+        await interviewManager.fetchInterviews(auth_token);
+        const interview = await interviewManager.getInterviewById(interview_id, auth_token);
         if (!interview) {
             throw new ServerError(`Interview with ID ${interview_id} not found`, 404);
         }
 
-        interviewManager.setCurrentInterview(interview_id, meet_link, duration);
+        interviewManager.setCurrentInterview(interview_id, meet_link, duration, auth_token);
 
-        const result = await botManager.startBot(meet_link, duration);
-
+        const result = await botManager.startBot(meet_link, duration, auth_token, interview_id);
         res.json({
             ...result,
             interview_id: interview_id,
@@ -493,7 +504,6 @@ app.get("/api/bot/health", async (req, res, next) => {
     }
 });
 
-// =============== Interview Management API Routes ===============
 app.get("/api/interviews", async (req, res, next) => {
     try {
         const interviews = await interviewManager.fetchInterviews();
@@ -566,6 +576,40 @@ app.get("/api/interviews/:id", async (req, res, next) => {
         });
     } catch (error) {
         next(error);
+    }
+});
+
+app.get("/api/analytics", async (req, res) => {
+    try {
+        const botStatus = await botManager.getBotStatus().catch(() => ({
+            success: false,
+            status: 'unreachable'
+        }));
+
+        const currentInterview = interviewManager.getCurrentInterview();
+
+        res.json({
+            success: true,
+            gemini: geminiAnalyzer.getStats(),
+            participants: participantManager.getAll(),
+            sox: audioDeviceManager.getStatus(),
+            bot: botStatus.success ? botStatus : { status: 'unreachable' },
+            interview: {
+                current: currentInterview,
+                total_loaded: interviewManager.getAllInterviews().length
+            },
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        res.json({
+            success: true,
+            gemini: geminiAnalyzer.getStats(),
+            participants: participantManager.getAll(),
+            sox: audioDeviceManager.getStatus(),
+            bot: { status: 'error', error: error.message },
+            interview: { current: null, error: error.message },
+            timestamp: new Date().toISOString()
+        });
     }
 });
 
@@ -1283,7 +1327,7 @@ class GeminiAnalyzer {
         this.currentModel = "gemini-2.5-flash";
     }
 
-    async analyze(speaker, text) {
+    async analyze(speaker, text, interviewDetails) {
         if (!text || text.trim().length < 20 || this.isNoise(text)) {
             console.log('[gemini] Skipping analysis - text too short or noise:', text.substring(0, 50));
             return this.getFallbackResponse();
@@ -1291,11 +1335,15 @@ class GeminiAnalyzer {
 
         this.requestCount++;
 
+        const candidateName = interviewDetails?.candidate_name || 'the candidate';
+        const jobPosition = interviewDetails?.position || 'a specific job position';
+
         const prompt = `
-            You are an AI assistant analyzing interview conversations. Analyze the following transcript and identify:
+            You are an AI assistant analyzing an interview conversation between an interviewer and ${candidateName} for a ${jobPosition} position.
+            Analyze the following transcript and identify:
             1. The interview question being asked (if any)
             2. The candidate's answer
-            3. Key insights about the answer
+            3. Key insights about the answer, specifically relating to ${candidateName}'s suitability for the ${jobPosition} role.
 
             Speaker: ${speaker}
             Transcript: "${text}"
@@ -1304,7 +1352,7 @@ class GeminiAnalyzer {
             {
                 "detected_question": "The actual interview question that was asked, if identifiable",
                 "candidate_answer_summary": "Brief summary of the candidate's response",
-                "semantics": "Key semantic meaning, skills, experience, or attitudes mentioned",
+                "semantics": "Key semantic meaning, skills, experience, or attitudes mentioned, especially regarding ${candidateName}'s fit for ${jobPosition}",
                 "questions": ["Question 1 for follow-up", "Question 2 for follow-up"],
                 "confidence": 0.95,
                 "keywords": ["keyword1", "keyword2", "keyword3"],
@@ -1455,7 +1503,7 @@ class GeminiAnalyzer {
         if (lines.length > 0) {
             const firstLine = lines[0].replace(/["{}]/g, '').trim();
             if (firstLine.length > 10 && !firstLine.includes('{') && !firstLine.includes('}')) {
-                candidate_answer_summary = firstLine.substring(0, 150);
+                summary = firstLine.substring(0, 150);
             }
         }
 
@@ -1532,18 +1580,13 @@ speechProcessor.on('transcript', (data) => {
     });
 });
 
-speechProcessor.on('analysis', async (data) => {
-    const { speaker, text, timestamp } = data;
+// const DJANGO_URL = "https://recos-7bb46015fb57.herokuapp.com/api/interview_conversations/";
+const DJANGO_URL = "http://127.0.0.1:8000/api/interview_conversations/";
 
+speechProcessor.on('analysis', async (data) => {
+    const { speaker, text, speakerTag, timestamp } = data;
     try {
         const analysis = await geminiAnalyzer.analyze(speaker, text);
-
-        console.log("Analysis completed:", {
-            speaker,
-            text_length: text.length,
-            summary: analysis.candidate_answer_summary,
-            confidence: analysis.confidence
-        });
 
         const currentInterview = interviewManager.getCurrentInterview();
 
@@ -1558,72 +1601,99 @@ speechProcessor.on('analysis', async (data) => {
         const finalQuestion = mappedQuestion || analysis.detected_question || detectedQuestion || analysis.candidate_answer_summary;
         const finalAnswer = questionMapper.extractAnswer(text, finalQuestion) || candidateAnswer || text;
 
+        // Create properly formatted data for frontend
+        const frontendData = {
+            transcript: text,
+            speaker_name: speaker,
+            speaker_tag: speakerTag,
+            analysis: analysis,
+            message_type: "enriched_transcript",
+            end_of_turn: true,
+            timestamp: timestamp || Date.now(),
+            is_final: true
+        };
+
+        // Send to Django backend
         const djangoPayload = {
             interview: currentInterview.id,
             question_text: finalQuestion,
             expected_answer: analysis.semantics,
             candidate_answer: finalAnswer,
-            speaker_label: speaker,
             analysis_confidence: analysis.confidence,
             keywords: analysis.keywords,
             follow_up_questions: analysis.questions,
             answer_quality: analysis.answer_quality,
             transcript_segment: text,
-            timestamp: timestamp || new Date().toISOString()
+            transcript_time: new Date(timestamp).toISOString()
         };
 
-        console.log("Payload to Django:", {
-            interview_id: djangoPayload.interview,
-            question: djangoPayload.question_text?.substring(0, 100) + "...",
-            candidate_answer_length: djangoPayload.candidate_answer?.length,
-            speaker: djangoPayload.speaker_label,
-            answer_quality: djangoPayload.answer_quality
-        });
+        console.log('[integration] Sending to Django:', djangoPayload);
 
-        fetch(`${interviewManager.djangoUrl}/interview_conversations/`, {
+        // Send to Django
+        fetch(DJANGO_URL, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
-                "Authorization": `Token ${interviewManager.apiToken}`
+                "Authorization": `Token ${currentInterview.token}`
             },
             body: JSON.stringify(djangoPayload)
         })
-            .then(async response => {
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    throw new Error(`HTTP ${response.status}: ${errorText}`);
-                }
-                return response.json();
-            })
-            .then(responseData => {
-                console.log("[integration] Successfully sent to Django. Conversation ID:", responseData.conversation_id);
-            })
-            .catch(err => {
-                console.error("[integration] Django POST error:", err.message);
-            });
+            .then(res => res.json())
+            .then(response => console.log("[integration] Django response:", response))
+            .catch(err => console.error("[integration] Django POST error:", err));
 
-        const wsPayload = {
-            type: "analysis",
-            interview_id: currentInterview.id,
-            speaker: speaker,
-            question: djangoPayload.question_text,
-            candidate_answer: djangoPayload.candidate_answer,
-            analysis: analysis,
-            timestamp: new Date().toISOString()
-        };
-
+        // Send formatted data to WebSocket clients
         wss.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify(wsPayload));
+                client.send(JSON.stringify(frontendData));
             }
         });
 
+                // fetch(`${interviewManager.djangoUrl}/interview_conversations/`, {
+        //             method: "POST",
+        //             headers: {
+        //                 "Content-Type": "application/json",
+        //                 "Authorization": `Token ${interviewManager.apiToken}`
+        //             },
+        //             body: JSON.stringify(djangoPayload)
+        //         })
+        //             .then(async response => {
+        //                 if (!response.ok) {
+        //                     const errorText = await response.text();
+        //                     throw new Error(`HTTP ${response.status}: ${errorText}`);
+        //                 }
+        //                 return response.json();
+        //             })
+        //             .then(responseData => {
+        //                 console.log("[integration] Successfully sent to Django. Conversation ID:", responseData.conversation_id);
+        //             })
+        //             .catch(err => {
+        //                 console.error("[integration] Django POST error:", err.message);
+        //             });
+
+        //         const wsPayload = {
+        //             type: "analysis",
+        //             interview_id: currentInterview.id,
+        //             speaker: speaker,
+        //             question: djangoPayload.question_text,
+        //             candidate_answer: djangoPayload.candidate_answer,
+        //             analysis: analysis,
+        //             timestamp: new Date().toISOString()
+        //         };
+
+        //         wss.clients.forEach(client => {
+        //             if (client.readyState === WebSocket.OPEN) {
+        //                 client.send(JSON.stringify(wsPayload));
+        //             }
+        //         });
+
     } catch (error) {
-        console.error('[server] Error in analysis pipeline:', error);
+        console.error('[server] Error in Gemini analysis:', error);
     }
 });
 
 wss.on("connection", (client, req) => {
+    console.log('[server] WebSocket connection attempted');
     const origin = req.headers.origin;
 
     if (origin && !CONFIG.CORS.allowedOrigins.includes(origin) && origin !== 'null') {
@@ -1681,41 +1751,6 @@ wss.on("connection", (client, req) => {
     });
 });
 
-// =============== Analytics Endpoint ===============
-app.get("/api/analytics", async (req, res) => {
-    try {
-        const botStatus = await botManager.getBotStatus().catch(() => ({
-            success: false,
-            status: 'unreachable'
-        }));
-
-        const currentInterview = interviewManager.getCurrentInterview();
-
-        res.json({
-            success: true,
-            gemini: geminiAnalyzer.getStats(),
-            participants: participantManager.getAll(),
-            sox: audioDeviceManager.getStatus(),
-            bot: botStatus.success ? botStatus : { status: 'unreachable' },
-            interview: {
-                current: currentInterview,
-                total_loaded: interviewManager.getAllInterviews().length
-            },
-            timestamp: new Date().toISOString()
-        });
-    } catch (error) {
-        res.json({
-            success: true,
-            gemini: geminiAnalyzer.getStats(),
-            participants: participantManager.getAll(),
-            sox: audioDeviceManager.getStatus(),
-            bot: { status: 'error', error: error.message },
-            interview: { current: null, error: error.message },
-            timestamp: new Date().toISOString()
-        });
-    }
-});
-
 // =============== Server Startup ===============
 const startServer = async () => {
     try {
@@ -1765,4 +1800,5 @@ const gracefulShutdown = async () => {
 process.on('SIGINT', gracefulShutdown);
 process.on('SIGTERM', gracefulShutdown);
 
+// Start the server
 startServer();
