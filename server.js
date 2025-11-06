@@ -1000,8 +1000,15 @@ class SpeechProcessor {
                 },
                 model: 'latest_long',
                 useEnhanced: true,
+                enableWordTimeOffsets: true,
+                maxAlternatives: 1,
+                profanityFilter: false,
+                adaptation: {
+                    phrase_set: [], // You can add common phrases here
+                }
             },
             interimResults: true,
+            single_utterance: false,
         };
 
         this.recognizeStream = this.client
@@ -1009,6 +1016,8 @@ class SpeechProcessor {
             .on('error', (err) => this.handleStreamError(err))
             .on('data', (stream) => this.handleSpeechData(stream))
             .on('end', () => this.handleStreamEnd());
+
+        const productionTimeout = process.env.NODE_ENV === 'production' ? 180000 : this.maxStreamDuration;
 
         this.streamTimeout = setTimeout(() => {
             console.log('[speech-stream] Restarting due to time limit (avoiding 305s API limit)');
@@ -1063,6 +1072,11 @@ class SpeechProcessor {
 
                     if (this.firstAudioReceived) {
                         this.resetStreamTimeout();
+                    }
+
+                    if (this.audioInput.length > 100) {
+                        console.log('[speech-stream] Audio buffer too large, clearing to prevent timeout');
+                        this.audioInput = this.audioInput.slice(-50);
                     }
 
                     if (this.newStream && this.lastAudioInput.length > 0) {
@@ -1155,7 +1169,13 @@ class SpeechProcessor {
             this.pendingRestart = true;
             if (err.code === 11) {
                 console.log('[speech-stream] Restarting due to timeout');
-                this.restartStream();
+                if (process.env.NODE_ENV === 'production') {
+                    this.cleanup();
+                    this.resetStreamState();
+                    setTimeout(() => this.startStream(), 500);
+                } else {
+                    this.restartStream();
+                }
             } else {
                 console.error('[speech-stream] Non-timeout error:', err);
                 setTimeout(() => this.restartStream(), 1000);
@@ -1202,7 +1222,10 @@ class SpeechProcessor {
         this.newStream = true;
         this.restartCounter++;
 
-        const delay = Math.min(1000 * Math.pow(1.5, this.restartCounter % 5), 10000);
+        // Use a more aggressive restart strategy in production
+        const baseDelay = process.env.NODE_ENV === 'production' ? 500 : 1000;
+        const maxDelay = process.env.NODE_ENV === 'production' ? 3000 : 10000;
+        const delay = Math.min(baseDelay * Math.pow(1.5, this.restartCounter % 5), maxDelay);
 
         setTimeout(() => {
             this.startStream();
@@ -1243,15 +1266,20 @@ class SpeechProcessor {
                     this.speakerBuffer[mappedSpeaker] += ' ' + transcript;
                     this.lastSpeechTime[mappedSpeaker] = Date.now();
 
+                    // Reduce the buffer size for production to prevent timeouts
+                    const productionMinSegmentLength = process.env.NODE_ENV === 'production' ? 30 : CONFIG.BUFFER.minSegmentLength;
+                    const productionMaxSegmentLength = process.env.NODE_ENV === 'production' ? 300 : CONFIG.BUFFER.maxSegmentLength;
+                    const productionSilenceThreshold = process.env.NODE_ENV === 'production' ? 1500 : CONFIG.BUFFER.silenceThresholdMs;
+
                     const shouldProcess =
-                        this.speakerBuffer[mappedSpeaker].length >= CONFIG.BUFFER.maxSegmentLength ||
-                        (this.speakerBuffer[mappedSpeaker].length >= CONFIG.BUFFER.minSegmentLength &&
-                            Date.now() - this.lastSpeechTime[mappedSpeaker] > CONFIG.BUFFER.silenceThresholdMs);
+                        this.speakerBuffer[mappedSpeaker].length >= productionMaxSegmentLength ||
+                        (this.speakerBuffer[mappedSpeaker].length >= productionMinSegmentLength &&
+                            Date.now() - this.lastSpeechTime[mappedSpeaker] > productionSilenceThreshold);
 
                     if (shouldProcess) {
                         const textToAnalyze = this.speakerBuffer[mappedSpeaker].trim();
 
-                        if (textToAnalyze.length > CONFIG.BUFFER.minSegmentLength) {
+                        if (textToAnalyze.length > productionMinSegmentLength) {
                             this.emit('analysis', {
                                 speaker: mappedSpeaker,
                                 text: textToAnalyze,
@@ -1648,44 +1676,6 @@ speechProcessor.on('analysis', async (data) => {
                 client.send(JSON.stringify(frontendData));
             }
         });
-
-                // fetch(`${interviewManager.djangoUrl}/interview_conversations/`, {
-        //             method: "POST",
-        //             headers: {
-        //                 "Content-Type": "application/json",
-        //                 "Authorization": `Token ${interviewManager.apiToken}`
-        //             },
-        //             body: JSON.stringify(djangoPayload)
-        //         })
-        //             .then(async response => {
-        //                 if (!response.ok) {
-        //                     const errorText = await response.text();
-        //                     throw new Error(`HTTP ${response.status}: ${errorText}`);
-        //                 }
-        //                 return response.json();
-        //             })
-        //             .then(responseData => {
-        //                 console.log("[integration] Successfully sent to Django. Conversation ID:", responseData.conversation_id);
-        //             })
-        //             .catch(err => {
-        //                 console.error("[integration] Django POST error:", err.message);
-        //             });
-
-        //         const wsPayload = {
-        //             type: "analysis",
-        //             interview_id: currentInterview.id,
-        //             speaker: speaker,
-        //             question: djangoPayload.question_text,
-        //             candidate_answer: djangoPayload.candidate_answer,
-        //             analysis: analysis,
-        //             timestamp: new Date().toISOString()
-        //         };
-
-        //         wss.clients.forEach(client => {
-        //             if (client.readyState === WebSocket.OPEN) {
-        //                 client.send(JSON.stringify(wsPayload));
-        //             }
-        //         });
 
     } catch (error) {
         console.error('[server] Error in Gemini analysis:', error);
