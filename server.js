@@ -1611,6 +1611,77 @@ speechProcessor.on('transcript', (data) => {
 // const DJANGO_URL = "https://recos-7bb46015fb57.herokuapp.com/api/interview_conversations/";
 const DJANGO_URL = "http://127.0.0.1:8000/api/interview_conversations/";
 
+// speechProcessor.on('analysis', async (data) => {
+//     const { speaker, text, speakerTag, timestamp } = data;
+//     try {
+//         const analysis = await geminiAnalyzer.analyze(speaker, text);
+
+//         const currentInterview = interviewManager.getCurrentInterview();
+
+//         if (!currentInterview) {
+//             console.warn('[integration] No current interview set, skipping Django submission');
+//             return;
+//         }
+
+//         const { detectedQuestion, candidateAnswer } = extractQuestionAndAnswer(text);
+
+//         const mappedQuestion = questionMapper.findMatchingQuestion(text);
+//         const finalQuestion = mappedQuestion || analysis.detected_question || detectedQuestion || analysis.candidate_answer_summary;
+//         const finalAnswer = questionMapper.extractAnswer(text, finalQuestion) || candidateAnswer || text;
+
+//         // Create properly formatted data for frontend
+//         const frontendData = {
+//             transcript: text,
+//             speaker_name: speaker,
+//             speaker_tag: speakerTag,
+//             analysis: analysis,
+//             message_type: "enriched_transcript",
+//             end_of_turn: true,
+//             timestamp: timestamp || Date.now(),
+//             is_final: true
+//         };
+
+//         // Send to Django backend
+//         const djangoPayload = {
+//             interview: currentInterview.id,
+//             question_text: finalQuestion,
+//             expected_answer: analysis.semantics,
+//             candidate_answer: finalAnswer,
+//             analysis_confidence: analysis.confidence,
+//             keywords: analysis.keywords,
+//             follow_up_questions: analysis.questions,
+//             answer_quality: analysis.answer_quality,
+//             transcript_segment: text,
+//             transcript_time: new Date(timestamp).toISOString()
+//         };
+
+//         console.log('[integration] Sending to Django:', djangoPayload);
+
+//         // Send to Django
+//         fetch(DJANGO_URL, {
+//             method: "POST",
+//             headers: {
+//                 "Content-Type": "application/json",
+//                 "Authorization": `Token ${currentInterview.token}`
+//             },
+//             body: JSON.stringify(djangoPayload)
+//         })
+//             .then(res => res.json())
+//             .then(response => console.log("[integration] Django response:", response))
+//             .catch(err => console.error("[integration] Django POST error:", err));
+
+//         // Send formatted data to WebSocket clients
+//         wss.clients.forEach(client => {
+//             if (client.readyState === WebSocket.OPEN) {
+//                 client.send(JSON.stringify(frontendData));
+//             }
+//         });
+
+//     } catch (error) {
+//         console.error('[server] Error in Gemini analysis:', error);
+//     }
+// });
+
 speechProcessor.on('analysis', async (data) => {
     const { speaker, text, speakerTag, timestamp } = data;
     try {
@@ -1618,67 +1689,102 @@ speechProcessor.on('analysis', async (data) => {
 
         const currentInterview = interviewManager.getCurrentInterview();
 
-        if (!currentInterview) {
-            console.warn('[integration] No current interview set, skipping Django submission');
-            return;
-        }
-
+        // Extract question and answer for Django (only if needed)
         const { detectedQuestion, candidateAnswer } = extractQuestionAndAnswer(text);
-
         const mappedQuestion = questionMapper.findMatchingQuestion(text);
         const finalQuestion = mappedQuestion || analysis.detected_question || detectedQuestion || analysis.candidate_answer_summary;
         const finalAnswer = questionMapper.extractAnswer(text, finalQuestion) || candidateAnswer || text;
 
-        // Create properly formatted data for frontend
+        // ALWAYS create frontend data - this is the critical fix!
         const frontendData = {
             transcript: text,
             speaker_name: speaker,
             speaker_tag: speakerTag,
-            analysis: analysis,
+            analysis: analysis, // This is what the frontend needs
             message_type: "enriched_transcript",
             end_of_turn: true,
             timestamp: timestamp || Date.now(),
             is_final: true
         };
 
-        // Send to Django backend
-        const djangoPayload = {
-            interview: currentInterview.id,
-            question_text: finalQuestion,
-            expected_answer: analysis.semantics,
-            candidate_answer: finalAnswer,
-            analysis_confidence: analysis.confidence,
-            keywords: analysis.keywords,
-            follow_up_questions: analysis.questions,
-            answer_quality: analysis.answer_quality,
-            transcript_segment: text,
-            transcript_time: new Date(timestamp).toISOString()
-        };
+        console.log('🚀 SENDING ANALYSIS TO FRONTEND:', {
+            speaker: speaker,
+            transcript_length: text.length,
+            has_analysis: true,
+            detected_question: analysis.detected_question,
+            answer_summary: analysis.candidate_answer_summary?.substring(0, 50)
+        });
 
-        console.log('[integration] Sending to Django:', djangoPayload);
-
-        // Send to Django
-        fetch(DJANGO_URL, {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Token ${currentInterview.token}`
-            },
-            body: JSON.stringify(djangoPayload)
-        })
-            .then(res => res.json())
-            .then(response => console.log("[integration] Django response:", response))
-            .catch(err => console.error("[integration] Django POST error:", err));
-
-        // Send formatted data to WebSocket clients
+        // ALWAYS send to WebSocket clients (frontend) regardless of interview status
         wss.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
                 client.send(JSON.stringify(frontendData));
+                console.log('✅ Analysis sent to WebSocket client');
             }
         });
 
+        // Only try Django if interview is set (optional)
+        if (currentInterview) {
+            console.log('[integration] Also sending to Django...');
+            const djangoPayload = {
+                interview: currentInterview.id,
+                question_text: finalQuestion,
+                expected_answer: analysis.semantics,
+                candidate_answer: finalAnswer,
+                analysis_confidence: analysis.confidence,
+                keywords: analysis.keywords,
+                follow_up_questions: analysis.questions,
+                answer_quality: analysis.answer_quality,
+                transcript_segment: text,
+                transcript_time: new Date(timestamp).toISOString()
+            };
+
+            console.log('[integration] Sending to Django:', djangoPayload);
+
+            // Send to Django
+            fetch(DJANGO_URL, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Token ${currentInterview.token}`
+                },
+                body: JSON.stringify(djangoPayload)
+            })
+                .then(res => res.json())
+                .then(response => console.log("[integration] Django response:", response))
+                .catch(err => console.error("[integration] Django POST error:", err));
+
+        } else {
+            console.log('[integration] No current interview - analysis sent ONLY to frontend');
+        }
+
     } catch (error) {
         console.error('[server] Error in Gemini analysis:', error);
+
+        // Send error analysis to frontend
+        const errorData = {
+            transcript: text,
+            speaker_name: speaker,
+            speaker_tag: speakerTag,
+            analysis: {
+                detected_question: "",
+                candidate_answer_summary: "Analysis failed - please try again",
+                semantics: "Error processing analysis",
+                questions: ["Could you repeat that?"],
+                confidence: 0,
+                keywords: [],
+                answer_quality: "unknown"
+            },
+            message_type: "enriched_transcript",
+            timestamp: timestamp || Date.now(),
+            is_final: true
+        };
+
+        wss.clients.forEach(client => {
+            if (client.readyState === WebSocket.OPEN) {
+                client.send(JSON.stringify(errorData));
+            }
+        });
     }
 });
 
