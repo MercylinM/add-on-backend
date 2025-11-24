@@ -45,6 +45,7 @@ const CONFIG = {
             'https://recos-meet-addon.vercel.app',
             'http://localhost:3000',
             'http://localhost:3001',
+            'http://localhost:3002',
             'http://localhost:10000',
             'https://gmeet-bot.onrender.com'
         ]
